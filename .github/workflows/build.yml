@@ -170,6 +170,9 @@ jobs:
           python3 tools/train_trajectory_v2.py --write --self-test
           git diff --exit-code -- main/fm_traj.bsasm main/trajectory_v2_lut.h
           python3 tools/range_demod_bench.py --self-test
+          gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_phase8_envelope.c main/direct_gain_v3.c main/arc_phy.c -o /tmp/test_phase8_envelope
+          /tmp/test_phase8_envelope
+          python3 tools/p8env_sweep.py --self-test
 
   build:
     name: Build Production Firmware (ESP32-C5)

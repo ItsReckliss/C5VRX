@@ -43,6 +43,7 @@
 #include "direct_gain_v2.h"
 #include "direct_gain_v3.h"
 #include "phase8_gain_lut.h"
+#include "phase8_envelope.h"
 #include "rx_auto_lab.h"
 #include "trajectory_v2_lut.h"
 #include "hal/parlio_ll.h"
@@ -1101,6 +1102,8 @@ typedef enum {
 } analog_agc_mode_t;
 
 static volatile analog_agc_mode_t s_agc_mode = ANALOG_AGC_ACTIVE;
+/* Firmware AGC mode to persist while the native experiment forces MANUAL. */
+static analog_agc_mode_t s_agc_mode_before_native = ANALOG_AGC_ACTIVE;
 
 typedef enum {
     AGC_STATE_SEARCH = 0,
@@ -1352,6 +1355,8 @@ static void step_frequency_offset_khz_tracked(int delta_khz)
 
 static uint8_t apply_rx_gain_tracked(uint8_t gain)
 {
+    /* Native AGC experiment: the vendor loop owns gain; keep state unchanged. */
+    if (rf_native_agc_active()) return s_current_gain;
     gain = profile_gain_clamp(gain);
     s_shadow_gain = gain;
 
@@ -1461,6 +1466,37 @@ static void direct_gain_v2_fast_tick(const control_metrics_t *metrics,
     }
 }
 
+/* Copy four separated 64-byte regions of the latest completed RX descriptor.
+ * Never touches a descriptor still owned by the RX DMA engine and never
+ * participates in the 40 MS/s video clock. Returns false for a stale/slow copy. */
+#define RX_PROBE_REGION_BYTES 64u
+#define RX_PROBE_REGIONS      4u
+static bool rx_probe_copy_completed(uint8_t sample[RX_PROBE_REGIONS * RX_PROBE_REGION_BYTES])
+{
+    static const size_t offset[RX_PROBE_REGIONS] = {512u, 1536u, 2560u, 4028u};
+    if (s_rx_dma_ch < 0 || s_rx_dma_ch >= 3 || s_rx_dscr_count < 2)
+        return false;
+    int64_t copy_start_us = esp_timer_get_time();
+    uint32_t active_addr = AHB_DMA.channel[s_rx_dma_ch].in.in_dscr_bf0.val;
+    int active_idx = find_dscr_index(s_rx_dscr_nodes, s_rx_dscr_count,
+                                     active_addr);
+    if (active_idx < 0) return false;
+    int sample_idx = (active_idx - 1 + s_rx_dscr_count) % s_rx_dscr_count;
+    uint8_t *src = s_rx_dscr_nodes[sample_idx].buffer;
+    if (!src || s_rx_dscr_nodes[sample_idx].length < 4092u ||
+        src < s_raw_ring || src + 4092u > s_raw_ring + sizeof(s_raw_ring))
+        return false;
+    for (unsigned i = 0; i < RX_PROBE_REGIONS; ++i) {
+        sync_dma_m2c(src + offset[i], RX_PROBE_REGION_BYTES);
+        memcpy(sample + i * RX_PROBE_REGION_BYTES, src + offset[i],
+               RX_PROBE_REGION_BYTES);
+    }
+    if (esp_timer_get_time() - copy_start_us > 300) return false;
+    active_addr = AHB_DMA.channel[s_rx_dma_ch].in.in_dscr_bf0.val;
+    return find_dscr_index(s_rx_dscr_nodes, s_rx_dscr_count,
+                           active_addr) != sample_idx;
+}
+
 #if CONFIG_C5VRX_DIRECT_GAIN_V3_EXPERIMENT
 static void direct_gain_v3_apply_target(uint8_t target, uint32_t profile)
 {
@@ -1549,8 +1585,7 @@ static void direct_gain_v3_sentinel_task(void *arg)
 static void direct_gain_v3_observer_task(void *arg)
 {
     (void)arg;
-    static const size_t offset[4] = {512u, 1536u, 2560u, 4028u};
-    uint8_t sample[256];
+    uint8_t sample[RX_PROBE_REGIONS * RX_PROBE_REGION_BYTES];
     uint32_t seen_profile = UINT32_MAX, seen_arc = UINT32_MAX;
     bool was_active = false;
     for (;;) {
@@ -1586,26 +1621,7 @@ static void direct_gain_v3_observer_task(void *arg)
         }
 
         uint32_t gain_epoch = s_gain_transition_count;
-        if (s_rx_dma_ch < 0 || s_rx_dma_ch >= 3 || s_rx_dscr_count < 2)
-            continue;
-        int64_t copy_start_us = esp_timer_get_time();
-        uint32_t active_addr = AHB_DMA.channel[s_rx_dma_ch].in.in_dscr_bf0.val;
-        int active_idx = find_dscr_index(s_rx_dscr_nodes, s_rx_dscr_count,
-                                         active_addr);
-        if (active_idx < 0) continue;
-        int sample_idx = (active_idx - 1 + s_rx_dscr_count) % s_rx_dscr_count;
-        uint8_t *src = s_rx_dscr_nodes[sample_idx].buffer;
-        if (!src || s_rx_dscr_nodes[sample_idx].length < 4092u ||
-            src < s_raw_ring || src + 4092u > s_raw_ring + sizeof(s_raw_ring))
-            continue;
-        for (unsigned i = 0; i < 4u; ++i) {
-            sync_dma_m2c(src + offset[i], 64u);
-            memcpy(sample + i * 64u, src + offset[i], 64u);
-        }
-        if (esp_timer_get_time() - copy_start_us > 300) continue;
-        active_addr = AHB_DMA.channel[s_rx_dma_ch].in.in_dscr_bf0.val;
-        if (find_dscr_index(s_rx_dscr_nodes, s_rx_dscr_count,
-                            active_addr) == sample_idx) continue;
+        if (!rx_probe_copy_completed(sample)) continue;
         if (gain_epoch != s_gain_transition_count) continue;
         dg3_observation_t observation = direct_gain_v3_measure(
             sample, sizeof(sample), c5vrx_phase8_gain_lut,
@@ -1645,7 +1661,8 @@ static void settings_save(void)
         .afc_mode = (uint8_t)s_afc_mode,
         .output_mode = (uint8_t)s_output_mode,
         .video_std_mode = (uint8_t)s_video_std_mode,
-        .agc_mode = (uint8_t)s_agc_mode,
+        .agc_mode = (uint8_t)(rf_native_agc_active() ?
+                              s_agc_mode_before_native : s_agc_mode),
         .manual_gain = s_current_gain,
         .frequency_offset_khz = (int16_t)rf_get_frequency_offset_khz(),
         .menu_boot_btn_enabled = s_menu_boot_btn_enabled ? 1u : 0u,
@@ -1947,6 +1964,84 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            s_direct_gain_v3.settle_us[DG3_BB],
            s_direct_gain_v3.settle_us[DG3_RF]);
 #endif
+}
+
+/* Issue #119 origin-collapse oracle. On demand only ('E'): copy up to 32
+ * completed-descriptor probes (128 x 64 adjacent 25 ns samples) from the
+ * console task and print one P8ENV row. No PHY write, no gain decision and no
+ * participation in RX/TX pacing. A host sweep script sends 'E' per step. */
+#define P8ENV_CAPTURE_PROBES   32u
+#define P8ENV_CAPTURE_ATTEMPTS 96u
+static void p8env_capture_report(void)
+{
+    static p8env_accum_t acc;
+    static uint8_t sample[RX_PROBE_REGIONS * RX_PROBE_REGION_BYTES];
+    rf_native_agc_state_t native_before, native_after;
+    rf_get_native_agc_state(&native_before);
+    const uint32_t gain_epoch = s_gain_transition_count;
+    unsigned probes = 0, stale = 0;
+    uint32_t gain_reg_changes = 0, last_gain_reg = native_before.gain_status_reg;
+
+    p8env_reset(&acc);
+    for (unsigned attempt = 0; attempt < P8ENV_CAPTURE_ATTEMPTS &&
+                               probes < P8ENV_CAPTURE_PROBES; ++attempt) {
+        if (rx_probe_copy_completed(sample)) {
+            for (unsigned r = 0; r < RX_PROBE_REGIONS; ++r) {
+                p8env_break(&acc);
+                p8env_add(&acc, sample + r * RX_PROBE_REGION_BYTES,
+                          RX_PROBE_REGION_BYTES, c5vrx_phase8_gain_lut);
+            }
+            ++probes;
+        } else {
+            ++stale;
+        }
+        uint32_t gain_reg = rf_get_rx_gain_reg();
+        if (gain_reg != last_gain_reg) {
+            ++gain_reg_changes;
+            last_gain_reg = gain_reg;
+        }
+        vTaskDelay(1);
+    }
+    rf_get_native_agc_state(&native_after);
+    const p8env_summary_t e = p8env_summarize(&acc, &P8ENV_PROVISIONAL);
+    const hw_transport_counters_t t = lab_counter_snapshot();
+
+    printf("P8ENV t_ms=%lld native=%u blocked=%lu gain_reg=0x%08lx agc_reg=0x%08lx "
+           "gain_reg_changes=%lu fw_gain_epochs=%lu gain=%u agc=%u profile=%u demod=%u "
+           "probes=%u stale=%u n=%lu pairs=%lu p50=%u p90=%u p95=%u "
+           "central_pm=%u origin_pm=%u clip_pm=%u coh_pm=%u hard_pm=%u "
+           "hard_central_pm=%u hard_outer_pm=%u central_hard_share_pm=%u class=%s "
+           "radius_pm=%u/%u/%u/%u/%u/%u/%u/%u/%u/%u/%u "
+           "delta_pm=%u/%u/%u/%u/%u/%u/%u/%u/%u "
+           "sync_q=%d std_valid=%u rx_ovf=%lu tx_empty=%lu gdma_in=%lu gdma_out=%lu "
+           "bs_empty=%lu bs_eof=%lu\n",
+           (long long)(esp_timer_get_time() / 1000),
+           native_after.active ? 1u : 0u,
+           (unsigned long)native_after.blocked_writes,
+           (unsigned long)native_after.gain_status_reg,
+           (unsigned long)native_after.agc_ctrl_reg,
+           (unsigned long)gain_reg_changes,
+           (unsigned long)(s_gain_transition_count - gain_epoch),
+           s_current_gain, (unsigned)s_agc_mode, (unsigned)s_rx_profile,
+           (unsigned)s_demod_mode, probes, stale,
+           (unsigned long)acc.samples, (unsigned long)acc.pairs,
+           e.p50, e.p90, e.p95, e.central_pm, e.origin_pm, e.clip_pm,
+           e.coherence_pm, e.hard_pm, e.hard_given_central_pm,
+           e.hard_given_outer_pm, e.central_hard_share_pm,
+           p8env_class_name(e.cls),
+           e.radius_pm[0], e.radius_pm[1], e.radius_pm[2], e.radius_pm[3],
+           e.radius_pm[4], e.radius_pm[5], e.radius_pm[6], e.radius_pm[7],
+           e.radius_pm[8], e.radius_pm[9], e.radius_pm[10],
+           e.delta_pm[0], e.delta_pm[1], e.delta_pm[2], e.delta_pm[3],
+           e.delta_pm[4], e.delta_pm[5], e.delta_pm[6], e.delta_pm[7],
+           e.delta_pm[8],
+           s_last_sync_quality, s_detected_video_std_valid ? 1u : 0u,
+           (unsigned long)t.parl_rx_wovf_count,
+           (unsigned long)t.parl_tx_rempty_count,
+           (unsigned long)t.gdma_in_fault_count,
+           (unsigned long)t.gdma_out_fault_count,
+           (unsigned long)t.bs_fifo_empty_count,
+           (unsigned long)t.bs_eof_overload_count);
 }
 
 static void lab_apply_fixed_gain(uint8_t gain)
@@ -2506,6 +2601,30 @@ static void lab_request_fresh_phy_calibration(void)
     }
 
     printf("C5VRX_PREQ4_FULLCAL_ARMED action=reboot next_boot=fresh_vendor_phy_calibration\n");
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    esp_restart();
+}
+
+/* Issue #117/#119: native hardware AGC is a per-boot experiment because the
+ * vendor loop cannot be restored after C5VRX disables it. 'N' flips the NVS
+ * request and reboots; the next rf_start() decides ownership before PHY use. */
+static void lab_toggle_native_agc_boot(void)
+{
+    if (s_gain_sweep.active || s_menu_active || s_pre_q4_probe_active) {
+        printf("C5VRX_NATIVE_AGC_REFUSED reason=%s\n",
+               s_gain_sweep.active ? "gain_sweep_active" :
+               s_menu_active ? "menu_active" : "preq4_busy");
+        return;
+    }
+    bool enable = !rf_native_agc_active();
+    esp_err_t err = rf_request_native_agc_boot(enable);
+    if (err != ESP_OK) {
+        printf("C5VRX_NATIVE_AGC_ERROR err=%s\n", esp_err_to_name(err));
+        return;
+    }
+    printf("C5VRX_NATIVE_AGC_ARMED next_boot=%s action=reboot\n",
+           enable ? "native_hw_agc" : "firmware_gain_control");
     fflush(stdout);
     vTaskDelay(pdMS_TO_TICKS(120));
     esp_restart();
@@ -3207,6 +3326,13 @@ static void apply_rx_profile(rx_profile_t profile)
         if (rf_get_frequency_offset_khz() != 0) apply_frequency_offset_khz_tracked(0);
         apply_rx_gain_tracked(52u);
         break;
+    }
+
+    /* Native AGC experiment: every firmware controller stays idle (zero gain
+     * decisions); profile selection still sets BW/AFC ownership as usual. */
+    if (rf_native_agc_active()) {
+        if (s_agc_mode != ANALOG_AGC_MANUAL) s_agc_mode_before_native = s_agc_mode;
+        s_agc_mode = ANALOG_AGC_MANUAL;
     }
 
     video_standard_detector_reset();
@@ -4929,6 +5055,12 @@ static void console_diag_task(void *arg)
                     continue;
                 }
                 if (s_gain_sweep.active && (c == '\r' || c == '\n')) continue;
+                if (rf_native_agc_active() && c < 128 &&
+                    strchr("gFGRUSK+-kjasmDIYX", c)) {
+                    printf("C5VRX_NATIVE_AGC_OWNS_GAIN command=%c action=ignored "
+                           "hint=N_returns_to_firmware_gain\n", c);
+                    continue;
+                }
 
                 if (c == 'l' || c == 'L') {
                     int64_t now = esp_timer_get_time();
@@ -4959,6 +5091,10 @@ static void console_diag_task(void *arg)
 #if CONFIG_C5VRX_BS_RELATIVE_MIDDLE_PROBE
                     bs_relative_middle_probe_report();
 #endif
+                } else if (c == 'E') {
+                    p8env_capture_report();
+                } else if (c == 'N') {
+                    lab_toggle_native_agc_boot();
                 } else if (c == 'g') {
                     lab_start_gain_sweep();
                 } else if (c == 'F') {
@@ -5333,6 +5469,15 @@ esp_err_t video_start(void)
     s_output_mode = VIDEO_OUTPUT_6BIT_40;
 #endif
     apply_rx_profile(s_rx_profile);
+    if (rf_native_agc_active()) {
+        rf_native_agc_state_t native;
+        rf_get_native_agc_state(&native);
+        ESP_LOGW(TAG, "NATIVE HW AGC EXPERIMENT: vendor AGC never disabled, "
+                 "firmware gain writes blocked (gain_reg=0x%08lx agc_reg=0x%08lx). "
+                 "'E' = P8ENV row, 'N' = reboot to firmware gain control",
+                 (unsigned long)native.gain_status_reg,
+                 (unsigned long)native.agc_ctrl_reg);
+    }
 
     /* Zero the ring before starting. Flush to DMA-visible SRAM. */
     memset(s_raw_ring, 0, sizeof(s_raw_ring));

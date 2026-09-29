@@ -39,6 +39,15 @@
 /* Runtime analog filter state; startup remains BW40. */
 static bool s_analog_bw40 = true;
 
+/* Issue #117/#119 native hardware AGC experiment. Decided once per boot from
+ * NVS before PHY init: the vendor AGC cannot be restored after
+ * phy_disable_agc()/phy_rfagc_disable(), so it is never disabled instead. */
+#define NATIVE_AGC_NVS_NAMESPACE "c5vrx"
+#define NATIVE_AGC_NVS_KEY       "native_agc"
+#define RX_AGC_CTRL_REG          0x600A7030u
+static bool s_native_agc;
+static volatile uint32_t s_native_agc_blocked_writes;
+
 /* MAC TX queue hardware registers (IDF-pinned: ESP32-C5, IDF 6.0.x).
  * Identical to C5VRX-2 wifi5.c proven addresses. */
 #define REG32(a)         (*(volatile uint32_t *)(uintptr_t)(a))
@@ -310,11 +319,50 @@ esp_err_t rf_prepare_fresh_phy_calibration(void)
     return err;
 }
 
+static bool native_agc_boot_requested(void)
+{
+    nvs_handle_t handle;
+    uint8_t value = 0;
+    if (nvs_open(NATIVE_AGC_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
+        return false;
+    if (nvs_get_u8(handle, NATIVE_AGC_NVS_KEY, &value) != ESP_OK) value = 0;
+    nvs_close(handle);
+    return value == 1u;
+}
+
+esp_err_t rf_request_native_agc_boot(bool enable)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NATIVE_AGC_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = enable ? nvs_set_u8(handle, NATIVE_AGC_NVS_KEY, 1u)
+                 : nvs_erase_key(handle, NATIVE_AGC_NVS_KEY);
+    if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}
+
+bool rf_native_agc_active(void)
+{
+    return s_native_agc;
+}
+
+void rf_get_native_agc_state(rf_native_agc_state_t *state)
+{
+    if (!state) return;
+    state->active = s_native_agc;
+    state->gain_status_reg = REG32(RX_GAIN_STATUS_REG);
+    state->agc_ctrl_reg = REG32(RX_AGC_CTRL_REG);
+    state->blocked_writes = s_native_agc_blocked_writes;
+}
+
 esp_err_t rf_start(void)
 {
     /* NVS is required by ESP-IDF Wi-Fi/PHY initialization. */
     esp_err_t err = init_nvs();
     if (err != ESP_OK) return err;
+    s_native_agc = native_agc_boot_requested();
 
     /* esp_netif_init + default event loop are required by esp_wifi_init().
      * Tolerant of ESP_ERR_INVALID_STATE (already initialized by IDF). */
@@ -409,11 +457,15 @@ esp_err_t rf_start(void)
     /* Keep the vendor Wi-Fi packet AGC out of the analog-FM receive path.
      * C5VRX has its own slow analog-video gain controller below; leaving the
      * packet AGC enabled lets the closed PHY hunt/recalibrate independently,
-     * which invalidates our gain model and can desensitize weak-signal receive. */
+     * which invalidates our gain model and can desensitize weak-signal receive.
+     * The native-AGC experiment is the single exception: it never disables the
+     * vendor loop and C5VRX makes zero gain decisions or writes. */
     extern void phy_disable_agc(void);
     extern void phy_rfagc_disable(void);
-    phy_disable_agc();
-    phy_rfagc_disable();
+    if (!s_native_agc) {
+        phy_disable_agc();
+        phy_rfagc_disable();
+    }
 
     /* Boot wide for full analog-FM video bandwidth. Runtime BW20/AUTO is
      * explicitly opt-in from the native menu; BW40 remains the safe default. */
@@ -424,7 +476,14 @@ esp_err_t rf_start(void)
      * Provides sensitive reception of weak carriers out of the box while
      * active AGC dynamically manages gain tracking and overload protection. */
     extern void phy_force_rx_gain(bool enable, uint8_t gain_idx);
-    phy_force_rx_gain(true, 52);
+    extern void phy_fft_scale_force(bool force_en, int8_t force_value);
+    if (s_native_agc) {
+        /* Release, never choose: the vendor loop owns RF/BB/fine gain. */
+        phy_force_rx_gain(false, 0);
+        phy_fft_scale_force(false, 0);
+    } else {
+        phy_force_rx_gain(true, 52);
+    }
 
     /* Vendor PHY initialization has now generated both valid RX gain tables
      * and completed its own calibration. Capture that state read-only before
@@ -439,8 +498,9 @@ esp_err_t rf_start(void)
     phy_track_pll_deinit();
 #endif
 
-    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / gain=forced(52) / sta_disconnected_pm=0 / pll_track=disabled",
-                   RF_CHANNEL_NUMBER);
+    ESP_EARLY_LOGW(TAG, "RF ready: 5865 MHz / ch%u / BW40 / gain=%s / sta_disconnected_pm=0 / pll_track=disabled",
+                   RF_CHANNEL_NUMBER,
+                   s_native_agc ? "NATIVE_HW_AGC(zero firmware writes)" : "forced(52)");
     return ESP_OK;
 }
 
@@ -552,6 +612,12 @@ bool rf_get_analog_bandwidth(void)
 
 void rf_set_rx_gain(bool force, uint8_t gain_idx)
 {
+    /* Single choke point: in the native experiment every firmware gain write
+     * is refused and counted, so a non-zero count taints that capture. */
+    if (s_native_agc) {
+        ++s_native_agc_blocked_writes;
+        return;
+    }
     if (force) {
         s_current_gain_val = gain_idx;
     }
@@ -601,6 +667,10 @@ const rf_phy_snapshot_t *rf_get_arc_receive_tuple(void)
 
 void rf_set_fft_scale_force(bool force, int8_t value)
 {
+    if (s_native_agc && force) {
+        ++s_native_agc_blocked_writes;
+        return;
+    }
     /* The symbol is exported by the ESP32-C5 ROM PHY and is also used by
      * Espressif's CSI gain-control design. Keep it lab-only: whether it is
      * upstream of raw MODEM_DIAG is exactly what the FFT probe measures. */
@@ -694,7 +764,7 @@ void rf_set_frequency_offset_khz(int offset_khz)
 
     s_current_offset_khz = offset_khz;
     phy_chip_set_chan_offset(offset_khz);
-    phy_force_rx_gain(true, s_current_gain_val);
+    if (!s_native_agc) phy_force_rx_gain(true, s_current_gain_val);
 }
 
 void rf_step_frequency_offset_khz(int delta_khz)
@@ -745,10 +815,14 @@ esp_err_t rf_set_channel(size_t index)
 
     /* Public/undocumented retune paths can touch PHY receive state. Re-assert
      * the currently selected analog bandwidth after every channel change. */
-    phy_disable_agc();
-    phy_rfagc_disable();
+    if (s_native_agc) {
+        phy_force_rx_gain(false, 0);
+    } else {
+        phy_disable_agc();
+        phy_rfagc_disable();
+    }
     phy_wifi_fbw_sel(s_analog_bw40 ? 1u : 0u);
-    phy_force_rx_gain(true, s_current_gain_val);
+    if (!s_native_agc) phy_force_rx_gain(true, s_current_gain_val);
 
     /* A channel change may make the vendor PHY regenerate its active RX gain
      * table and calibrated receive state. Recapture only after the retune and
