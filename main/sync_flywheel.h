@@ -48,6 +48,17 @@ typedef struct {
     bool colour_kill;
     /* counters */
     uint32_t lines, clean, repaired, missed, vsyncs, skipped_floor, acquisitions;
+    /* Self-paced operation: work per call is bounded by a code budget; a
+     * flywheel that falls behind skips ahead (PLL and field counter keep
+     * predicting) instead of starving the CPU. */
+    uint32_t codes_used, skipped_lines, fast_lines;
+    /* Streaming acquisition state (resumes across calls). */
+    uint8_t acq_phase;
+    uint16_t acq_hist[64];
+    uint32_t acq_n;
+    uint16_t acq_run;
+    uint64_t acq_last_start;
+    bool acq_have_last;
     uint32_t kill_on_events;
 } sync_flywheel_t;
 
@@ -58,14 +69,14 @@ typedef struct {
 void sfw_init(sync_flywheel_t *f);
 
 /* Process predicted lines whose analysis window lies before avail_end
- * (absolute pair index, exclusive: data RX has completed), at most
- * max_lines per call (the rest carries over). Writes only to pairs >=
- * write_floor (ahead of the TX read position). Returns lines processed.
- * max_scan bounds acquisition work per call; the caller also rate-limits
- * acquisition calls so a missing signal never starves the CPU. */
+ * (absolute pair index, exclusive: data RX has completed). Writes only to
+ * pairs >= write_floor (ahead of the TX read position). Work is bounded by
+ * budget_codes demodulated codes per call (acquisition resumes on the next
+ * call; lines the budget cannot reach are skipped while the PLL coasts).
+ * Returns lines processed; f->codes_used reports the work done. */
 unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
                  uint64_t write_floor, bool allow_repair, bool allow_colour_kill,
-                 uint32_t max_scan, unsigned max_lines);
+                 uint32_t budget_codes);
 
 bool sfw_locked(const sync_flywheel_t *f);
 /* 1 = PAL, 2 = NTSC, 0 = unknown (from the tracked line period). */

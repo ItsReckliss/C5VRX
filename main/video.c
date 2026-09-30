@@ -299,6 +299,10 @@ static volatile bool s_sfw_enabled = true, s_sfw_colour_kill = true;
  * c5vrx/hc_demod = 1 ('P' toggles and reboots). Default Phase8 FULL. */
 static bool s_hc_demod;
 static volatile uint32_t s_sfw_rebases, s_sfw_max_us, s_sfw_last_us, s_sfw_sync_us;
+/* Self-pacing: the flywheel gets SFW_TARGET_US of every 200 us wake and
+ * learns its own cost per code on the chip to turn that into a budget. */
+#define SFW_TARGET_US 50u
+static volatile uint32_t s_sfw_budget = 1024u, s_sfw_ns_per_code = 300u;
 #endif
 static TaskHandle_t s_v3_sentinel_task_handle;
 static esp_timer_handle_t s_v3_sentinel_timer;
@@ -1730,14 +1734,6 @@ static void sync_flywheel_task(void *arg)
         last_us = now;
         uint64_t lag = ((rx_off - tx_off) & (RAW_RING_BYTES - 1u)) / 2u;
         uint64_t floor = rx_abs - lag + s_tx_dscr_nodes[ti].length / 2u + 128u;
-        /* Acquisition scans only ~two lines every 5 ms; tracking handles at
-         * most 6 lines per wake (~3 arrive per 200 us). A missing signal
-         * must never starve the console or other tasks. */
-        static int64_t last_acq_us;
-        if (s_sfw.state == SFW_ACQUIRE) {
-            if (now - last_acq_us < 5000) continue;
-            last_acq_us = now;
-        }
         int64_t ts = esp_timer_get_time();
         sync_dma_m2c(s_raw_ring, RAW_RING_BYTES);
         int64_t t0 = esp_timer_get_time();
@@ -1745,10 +1741,18 @@ static void sync_flywheel_task(void *arg)
         uint32_t repaired = s_sfw.repaired;
         bool kill = s_sfw.colour_kill;
         (void)sfw_run(&s_sfw, &ring, rx_abs, floor, true, s_sfw_colour_kill,
-                      2800u, 6u);
+                      s_sfw_budget);
         uint32_t spent = (uint32_t)(esp_timer_get_time() - t0);
         s_sfw_last_us = spent;
         if (spent > s_sfw_max_us) s_sfw_max_us = spent;
+        /* Learn ns per code (EMA) and size the next budget to the target. */
+        if (s_sfw.codes_used >= 128u) {
+            uint32_t ns = spent * 1000u / s_sfw.codes_used;
+            s_sfw_ns_per_code = (7u * s_sfw_ns_per_code + ns) / 8u;
+            if (!s_sfw_ns_per_code) s_sfw_ns_per_code = 1u;
+        }
+        uint32_t budget = SFW_TARGET_US * 1000u / s_sfw_ns_per_code;
+        s_sfw_budget = budget < 256u ? 256u : budget > 20000u ? 20000u : budget;
         if (s_sfw.repaired != repaired || kill || s_sfw.colour_kill)
             sync_dma_c2m(s_raw_ring, RAW_RING_BYTES);
         int std = sfw_standard(&s_sfw);
@@ -2179,7 +2183,8 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
     printf("SFW enabled=%u locked=%u std=%d state=%u lines=%lu clean=%lu "
            "repaired=%lu missed=%lu vsyncs=%lu acq=%lu thr=%u sync_q4=%u "
            "blank_q4=%u period_q8=%ld colour_kill=%u kill_events=%lu "
-           "floor_skips=%lu rebases=%lu run_us=%lu run_max_us=%lu sync_us=%lu\n",
+           "floor_skips=%lu rebases=%lu run_us=%lu run_max_us=%lu sync_us=%lu "
+           "budget=%lu ns_per_code=%lu codes=%lu skipped=%lu fast=%lu\n",
            s_sfw_enabled ? 1u : 0u, sfw_locked(&s_sfw) ? 1u : 0u,
            sfw_standard(&s_sfw), (unsigned)s_sfw.state,
            (unsigned long)s_sfw.lines, (unsigned long)s_sfw.clean,
@@ -2189,7 +2194,9 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            s_sfw.colour_kill ? 1u : 0u, (unsigned long)s_sfw.kill_on_events,
            (unsigned long)s_sfw.skipped_floor, (unsigned long)s_sfw_rebases,
            (unsigned long)s_sfw_last_us, (unsigned long)s_sfw_max_us,
-           (unsigned long)s_sfw_sync_us);
+           (unsigned long)s_sfw_sync_us, (unsigned long)s_sfw_budget,
+           (unsigned long)s_sfw_ns_per_code, (unsigned long)s_sfw.codes_used,
+           (unsigned long)s_sfw.skipped_lines, (unsigned long)s_sfw.fast_lines);
 #endif
 }
 

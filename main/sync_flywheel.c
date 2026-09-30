@@ -34,6 +34,8 @@
 #define SFW_COAST_LINES     650u   /* ~2 fields, ~10 pairs worst drift */
 #define SFW_LOCK_CLEAN      32u
 #define SFW_LOST_LINES      1200u
+/* Skip ahead when more than ~4 lines of completed data are unprocessed. */
+#define SFW_MAX_LAG_PAIRS   (4u * 1280u + 1024u)
 
 static uint8_t s_cell_for_phase[256];
 static const uint8_t *s_cell_lut_phase;
@@ -108,6 +110,12 @@ static inline uint8_t code_at(const sfw_ring_t *r, uint64_t k);
 /* Low test on a 4-code mean. Hardware: this VTX puts sync only ~4.5 Phase8
  * codes below blanking with +-1..2 codes of per-sample noise, so a
  * per-sample threshold misfires; the mean halves the noise. */
+static inline unsigned mean4_at(const sfw_ring_t *r, uint64_t k)
+{
+    return (code_at(r, k - 1u) + code_at(r, k) + code_at(r, k + 1u) +
+            code_at(r, k + 2u) + 2u) >> 2;
+}
+
 static inline bool low_at(const sync_flywheel_t *f, const sfw_ring_t *r,
                           uint64_t k)
 {
@@ -118,9 +126,12 @@ static inline bool low_at(const sync_flywheel_t *f, const sfw_ring_t *r,
     return sum <= 4u * f->thr + 2u;
 }
 
+static uint32_t s_codes;   /* codes demodulated in the current call */
+
 static SFW_HOT void cur_fill(uint32_t upto)
 {
     const sfw_ring_t *r = s_cur.r;
+    s_codes += upto - s_cur.n;
     const uint8_t *ring = r->ring;
     const uint32_t mask = r->ring_pairs - 1u;
     uint32_t n = s_cur.n;
@@ -257,56 +268,78 @@ static void synth(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t a,
     s_cur.r = NULL;                           /* ring changed: drop cache */
 }
 
-static void acquire(sync_flywheel_t *f, const sfw_ring_t *r,
-                    uint64_t avail_end, uint32_t max_scan)
+static void start_track(sync_flywheel_t *f, uint64_t start, int32_t nominal)
 {
-    if (avail_end < 4096u) return;
-    uint64_t oldest = avail_end > r->ring_pairs / 2u ?
-                      avail_end - r->ring_pairs / 2u : 1u;
-    if (f->scan_pos < oldest) f->scan_pos = oldest;
+    f->state = SFW_TRACK;
+    f->nominal_q8 = f->period_q8 = nominal;
+    f->field_lines = nominal == SFW_PAL_PERIOD_Q8 ? 313u : 263u;
+    f->next_q8 = (start << 8) + (uint64_t)nominal;
+    f->hit_q8 = 128u;
+    f->clean_since_acq = 0;
+    f->lines_since_clean = 0;
+    f->field_valid = false;
+    f->vertical_run = 0;
+    f->acq_phase = 0;
+    ++f->acquisitions;
+}
+
+/* Streaming acquisition, resumable across calls under the code budget:
+ * phase 0 builds a code histogram over ~2 lines for the threshold, phase 1
+ * streams smoothed lows looking for two H-sync-width runs one line apart. */
+static void acquire(sync_flywheel_t *f, const sfw_ring_t *r,
+                    uint64_t avail_end, uint32_t budget)
+{
+    if (avail_end < 4096u + SFW_SPAN) return;
+    uint64_t oldest = avail_end - r->ring_pairs / 2u;
     uint64_t end = avail_end - SFW_SPAN;
-    if (end > f->scan_pos + max_scan) end = f->scan_pos + max_scan;
-    if (end < f->scan_pos + 2600u) return;          /* need two lines */
-
-    uint16_t hist[64] = {0};
-    uint32_t n = 0;
-    for (uint64_t k = f->scan_pos; k < end; ++k, ++n) ++hist[code_at(r, k)];
-    unsigned c = 0, p2 = 0, p50 = 0;
-    bool got2 = false;
-    for (unsigned v = 0; v < 64u; ++v) {
-        c += hist[v];
-        if (!got2 && c * 50u >= n) { p2 = v; got2 = true; }
-        if (c * 2u >= n) { p50 = v; break; }
+    if (f->scan_pos + 1024u < oldest + 1024u || f->scan_pos < oldest + 1024u) {
+        /* The data under the scan is about to be overwritten: jump to recent
+         * data. The histogram needs no contiguity and is kept; a pulse run
+         * in progress is not. Lagging behind is fine while data exists. */
+        f->scan_pos = end > 2800u ? end - 2800u : 1u;
+        f->acq_run = 0;
+        f->acq_have_last = false;
     }
-    if (p50 < p2 + 4u) { f->scan_pos = end; return; }
-    f->thr = (uint8_t)(p2 + (p50 - p2) / 4u);
-
-    uint64_t starts[8];
-    unsigned count = 0, run = 0;
-    for (uint64_t k = f->scan_pos; k < end; ++k) {
-        if (low_at(f, r, k)) { ++run; continue; }
-        if (run >= 80u && run <= 110u && count < 8u) starts[count++] = k - run;
-        run = 0;
+    while (f->scan_pos < end && s_codes < budget) {
+        uint64_t k = f->scan_pos++;
+        if (f->acq_phase == 0) {
+            /* Histogram of the same 4-code mean that detection uses (HC
+             * sync alternates 8/2/0 codes; raw percentiles sit too low). */
+            ++f->acq_hist[mean4_at(r, k)];
+            if (++f->acq_n < 2600u) continue;
+            unsigned c = 0, p2 = 0, p50 = 0;
+            bool got2 = false;
+            for (unsigned v = 0; v < 64u; ++v) {
+                c += f->acq_hist[v];
+                if (!got2 && c * 50u >= f->acq_n) { p2 = v; got2 = true; }
+                if (c * 2u >= f->acq_n) { p50 = v; break; }
+            }
+            memset(f->acq_hist, 0, sizeof(f->acq_hist));
+            f->acq_n = 0;
+            if (p50 < p2 + 4u) continue;            /* no modulation yet */
+            f->thr = (uint8_t)(p2 + (p50 - p2) / 4u);
+            f->acq_phase = 1;
+            f->acq_run = 0;
+            f->acq_have_last = false;
+            continue;
+        }
+        if (low_at(f, r, k)) {
+            if (f->acq_run < 0xFFFFu) ++f->acq_run;
+            continue;
+        }
+        unsigned run = f->acq_run;
+        f->acq_run = 0;
+        if (run < 80u || run > 110u) continue;
+        uint64_t start = k - run;
+        if (f->acq_have_last) {
+            uint64_t d = start - f->acq_last_start;
+            if (d >= 1275u && d <= 1285u) { start_track(f, start, SFW_PAL_PERIOD_Q8); return; }
+            if (d >= 1266u && d <= 1276u) { start_track(f, start, SFW_NTSC_PERIOD_Q8); return; }
+        }
+        f->acq_last_start = start;
+        f->acq_have_last = true;
+        if (++f->acq_n > 8u) f->acq_phase = 0;   /* re-estimate threshold */
     }
-    for (unsigned a = 0; a + 1u < count; ++a) {
-        uint64_t p = starts[a + 1u] - starts[a];
-        int32_t nominal;
-        if (p >= 1275u && p <= 1285u) nominal = SFW_PAL_PERIOD_Q8;
-        else if (p >= 1266u && p <= 1276u) nominal = SFW_NTSC_PERIOD_Q8;
-        else continue;
-        f->state = SFW_TRACK;
-        f->nominal_q8 = f->period_q8 = nominal;
-        f->field_lines = nominal == SFW_PAL_PERIOD_Q8 ? 313u : 263u;
-        f->next_q8 = ((starts[a + 1u]) << 8) + (uint64_t)nominal;
-        f->hit_q8 = 128u;
-        f->clean_since_acq = 0;
-        f->lines_since_clean = 0;
-        f->field_valid = false;
-        f->vertical_run = 0;
-        ++f->acquisitions;
-        return;
-    }
-    f->scan_pos = end;
 }
 
 static unsigned mean_code(const sfw_ring_t *r, uint64_t a, uint64_t b)
@@ -314,6 +347,42 @@ static unsigned mean_code(const sfw_ring_t *r, uint64_t a, uint64_t b)
     unsigned sum = 0;
     for (uint64_t k = a; k < b; ++k) sum += code_at(r, k);
     return (sum << 4) / (unsigned)(b - a);          /* Q4 */
+}
+
+/* Field tracking from runs of broad/equalizing pulses; returns whether the
+ * current line is in the protected vertical window. */
+static bool field_step(sync_flywheel_t *f, bool vertical)
+{
+    if (vertical) {
+        /* Accept a V sync where the field counter expects it (after a
+         * coasted wrap it sits near the field start). */
+        if (++f->vertical_run == 3u &&
+            (!f->field_valid || f->line_in_field > f->field_lines / 2u ||
+             f->line_in_field < 12u)) {
+            f->line_in_field = 3u;
+            f->field_valid = true;
+            f->fields_coasted = 0;
+            ++f->vsyncs;
+        }
+    } else {
+        /* A real vertical interval is a run of consecutive broad /
+         * equalizing lines; anything else ends it (a lone noise run that
+         * looked like an equalizing pulse must not stick). */
+        f->vertical_run = 0;
+    }
+    ++f->line_in_field;
+    if (f->field_valid) {
+        /* Predicted field end: wrap to the next field's start (same +2
+         * offset a detected V sync gives), alternating the half line. */
+        uint16_t len = (uint16_t)(f->field_lines - (f->field_parity ? 1u : 0u));
+        if (f->line_in_field >= len + 2u) {
+            f->line_in_field = (uint16_t)(f->line_in_field - len);
+            f->field_parity = !f->field_parity;
+            if (++f->fields_coasted > SFW_FIELD_COAST) f->field_valid = false;
+        }
+    }
+    return !f->field_valid || f->vertical_run || f->line_in_field < 20u ||
+           f->line_in_field + 8u >= f->field_lines;
 }
 
 /* Low-code run length from `start`, tolerating single noisy samples;
@@ -344,20 +413,23 @@ static bool plausible_pulse(unsigned width, unsigned inside)
 
 unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
                  uint64_t write_floor, bool allow_repair, bool allow_colour_kill,
-                 uint32_t max_scan, unsigned max_lines)
+                 uint32_t budget_codes)
 {
     if (!f || !r || !r->ring || !r->phase || !r->ring_pairs ||
         (r->ring_pairs & (r->ring_pairs - 1u))) return 0;
     build_cells(r->phase);
     build_hc_cells(r->hc_dec);
     s_cur.r = NULL;   /* batch fill may have read not-yet-completed data */
+    s_codes = 0;
+    f->codes_used = 0;
     if (r->hc_dec && !r->hc_pair) return 0;
     if (f->state == SFW_ACQUIRE) {
-        acquire(f, r, avail_end, max_scan);
+        acquire(f, r, avail_end, budget_codes);
+        f->codes_used = s_codes;
         if (f->state == SFW_ACQUIRE) return 0;
     }
     unsigned processed = 0;
-    while (f->state == SFW_TRACK && processed < max_lines) {
+    while (f->state == SFW_TRACK && s_codes < budget_codes) {
         uint64_t pred = (f->next_q8 + 128u) >> 8;
         if (pred + SFW_WIN_UNLOCKED + SFW_SPAN + 600u > avail_end) break;
         if (pred + r->ring_pairs / 2u < avail_end) {
@@ -365,6 +437,14 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
             f->state = SFW_ACQUIRE;
             f->scan_pos = avail_end > 4096u ? avail_end - 4096u : 0u;
             break;
+        }
+        if (avail_end - pred > SFW_MAX_LAG_PAIRS) {
+            /* Out of budget earlier: skip this line unanalysed. The PLL and
+             * the field counter keep predicting; nothing is written. */
+            f->next_q8 += (uint64_t)(int64_t)f->period_q8;
+            (void)field_step(f, false);
+            ++f->skipped_lines;
+            continue;
         }
         bool locked = sfw_locked(f);
         /* The window widens while coasting (drift grows with coasted lines)
@@ -385,6 +465,22 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
         bool have = false;
         unsigned width = 0;
         uint64_t start = pred;
+        /* Fast path: locked and the previous line was clean -> check a few
+         * points of the expected pulse (high before, low across, high
+         * after) instead of scanning. ~10x less work on a good signal. */
+        if (locked && f->lines_since_clean == 0u &&
+            !low_at(f, r, pred - 3u) && low_at(f, r, pred + 3u) &&
+            low_at(f, r, pred + 30u) && low_at(f, r, pred + 60u) &&
+            low_at(f, r, pred + 88u) && !low_at(f, r, pred + 100u)) {
+            /* Exact edge within +-4 so the PLL keeps being steered. */
+            int e = -4;
+            while (e < 4 && !low_at(f, r, pred + (uint64_t)(int64_t)e)) ++e;
+            found = e;
+            start = pred + (uint64_t)(int64_t)e;
+            have = true;
+            width = SFW_SYNC_PAIRS;
+            ++f->fast_lines;
+        }
         for (int e = -win; e <= win && !have; ++e) {
             uint64_t k = pred + (uint64_t)(int64_t)e;
             if (low_at(f, r, k - 1u)) continue;
@@ -435,38 +531,7 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
         }
         f->hit_q8 = (uint16_t)(f->hit_q8 + ((clean ? 256 : 0) - (int)f->hit_q8) / 16);
 
-        /* Field tracking from runs of broad/equalizing pulses. */
-        if (vertical) {
-            /* Accept a V sync where the field counter expects it (after a
-             * coasted wrap it sits near the field start). */
-            if (++f->vertical_run == 3u &&
-                (!f->field_valid || f->line_in_field > f->field_lines / 2u ||
-                 f->line_in_field < 12u)) {
-                f->line_in_field = 3u;
-                f->field_valid = true;
-                f->fields_coasted = 0;
-                ++f->vsyncs;
-            }
-        } else {
-            /* A real vertical interval is a run of consecutive broad /
-             * equalizing lines; anything else ends it (a lone noise run
-             * that looked like an equalizing pulse must not stick). */
-            f->vertical_run = 0;
-        }
-        ++f->line_in_field;
-        if (f->field_valid) {
-            /* Predicted field end: wrap to the next field's start (same +2
-             * offset a detected V sync gives), alternating the half line. */
-            uint16_t len = (uint16_t)(f->field_lines - (f->field_parity ? 1u : 0u));
-            if (f->line_in_field >= len + 2u) {
-                f->line_in_field = (uint16_t)(f->line_in_field - len);
-                f->field_parity = !f->field_parity;
-                if (++f->fields_coasted > SFW_FIELD_COAST) f->field_valid = false;
-            }
-        }
-        bool in_vwin = !f->field_valid || f->vertical_run ||
-                       f->line_in_field < 20u ||
-                       f->line_in_field + 8u >= f->field_lines;
+        bool in_vwin = field_step(f, vertical);
 
         ++f->lines;
         ++processed;
@@ -474,7 +539,7 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
             ++f->clean;
             if (f->clean_since_acq < 0xFFFFu) ++f->clean_since_acq;
             f->lines_since_clean = 0;
-            if ((f->clean & 3u) == 0u) {
+            if ((f->clean & 15u) == 0u) {
                 unsigned s = mean_code(r, start + SFW_SYNC_LEVEL_FROM,
                                        start + SFW_SYNC_LEVEL_TO);
                 unsigned b = mean_code(r, start + SFW_BLANK_FROM,
@@ -523,5 +588,6 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
             f->colour_kill = false;
         }
     }
+    f->codes_used = s_codes;
     return processed;
 }

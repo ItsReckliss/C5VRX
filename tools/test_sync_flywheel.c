@@ -59,7 +59,7 @@ static int desired_bins(const levels_t *lv, unsigned line, unsigned x)
     return b + (int)((x * 7u + line * 3u) % (unsigned)(lv->white - b));
 }
 
-static void run_case(bool hc, const levels_t *lv)
+static void run_case(bool hc, const levels_t *lv, uint32_t budget)
 {
     srand(1);
     int phase = 0;
@@ -102,7 +102,7 @@ static void run_case(bool hc, const levels_t *lv)
         }
         rx += CHUNK;
         size_t tx_now = rx > TX_LAG ? rx - TX_LAG : 0;
-        sfw_run(&f, &r, rx, tx_now + 256u, true, true, 4096u, 1000u);
+        sfw_run(&f, &r, rx, tx_now + 256u, true, true, budget);
         locked_seen |= sfw_locked(&f);
         int sync_code = (f.sync_q4 + 8) >> 4;
         for (size_t k = tx; k < tx_now; ++k) {
@@ -198,9 +198,12 @@ int main(void)
     /* Hardware (this VTX on Phase8 FULL): sync ~24.5, blanking ~29 codes,
      * i.e. only ~18 bins deep, with per-sample noise of +-1..2 codes. */
     const levels_t shallow = { 4 * 24 - 126, 4 * 29 - 126, 4 * 38 - 126, 6 };
-    run_case(false, &phase8);
-    run_case(true, &golden);
-    run_case(false, &shallow);
+    run_case(false, &phase8, 0xFFFFFFFFu);
+    run_case(true, &golden, 0xFFFFFFFFu);
+    run_case(false, &shallow, 0xFFFFFFFFu);
+    /* Tight budget (CPU-starved chip): lines get skipped, but the safety
+     * invariants must hold and it must stay locked. */
+    run_case(false, &phase8, 700u);
     puts("sync flywheel: OK");
     return 0;
 }
