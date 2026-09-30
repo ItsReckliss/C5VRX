@@ -24,6 +24,11 @@ typedef struct {
     int confidence;   /* peak autocorrelation x100 over the line lags, <=0 = none */
     int lag;          /* best lag in output pairs (1266..1285) */
     int standard;     /* 1 = PAL, 2 = NTSC, 0 = unknown */
+    /* Mean carrier offset from the tuned channel (kHz). The 50 ns endpoint
+     * step is unambiguous only within +-10 MHz, so a carrier further away
+     * (seen through the BW40 filter from a neighbouring channel) aliases,
+     * but always to a larger |offset| than on the channel it sits on. */
+    int offset_khz;
 } analog_video_t;
 
 analog_video_t analog_video_detect(uint8_t *ep, size_t n, const uint8_t phase[256]);

@@ -4268,7 +4268,7 @@ static uint8_t *s_scan_video_buf;
 
 static analog_video_t scan_video_confidence(void)
 {
-    analog_video_t v[3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+    analog_video_t v[3] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
     if (!s_scan_video_buf) return v[0];
     for (unsigned w = 0; w < 3u; ++w) {
         if (w) vTaskDelay(pdMS_TO_TICKS(10));
@@ -4293,6 +4293,7 @@ static void channel_auto_search(void)
     int best_rank = -1;
     int best_quality = 0;
     int best_video = -1;
+    int best_offset = 0x7fffffff;
     const uint8_t max_gain = rf_get_arc_gain_table()->max_index;
 
     s_channel_scan_active = true;
@@ -4337,12 +4338,23 @@ static void channel_auto_search(void)
             if (far.confidence > video.confidence) video = far;
         }
         if (video.confidence >= ANALOG_VIDEO_MIN_CONFIDENCE) {
-            printf("[AUTO SEARCH] candidate %s (%u MHz): video=%d lag=%d %s rf=%d\n",
+            int off = video.offset_khz < 0 ? -video.offset_khz : video.offset_khz;
+            printf("[AUTO SEARCH] candidate %s (%u MHz): video=%d offset=%d kHz lag=%d %s rf=%d\n",
                    rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz,
-                   video.confidence, video.lag, video.standard == 1 ? "PAL" : "NTSC",
-                   rank);
-            if (video.confidence > best_video ||
-                (video.confidence == best_video && rank > best_rank)) {
+                   video.confidence, video.offset_khz, video.lag,
+                   video.standard == 1 ? "PAL" : "NTSC", rank);
+            /* The BW40 filter lets a VTX through on neighbouring channels
+             * too (hardware: A1's VTX gave valid video on B8/F7/F8/R7), and
+             * the confidence ignores offset by design. Choose the channel
+             * the carrier is centred on: smallest |offset| (500 kHz
+             * buckets), then confidence, then RF rank. */
+            int off_bucket = off / 500;
+            int best_bucket = best_offset / 500;
+            if (off_bucket < best_bucket ||
+                (off_bucket == best_bucket &&
+                 (video.confidence > best_video ||
+                  (video.confidence == best_video && rank > best_rank)))) {
+                best_offset = off;
                 best_video = video.confidence;
                 best_rank = rank;
                 best_channel = channel;
@@ -4364,9 +4376,13 @@ static void channel_auto_search(void)
             analog_video_t far = scan_video_confidence();
             if (far.confidence > confirm.confidence) confirm = far;
         }
-        if (confirm.confidence < ANALOG_VIDEO_MIN_CONFIDENCE) {
-            printf("[AUTO SEARCH] %s failed confirmation (video=%d)\n",
-                   rf_get_current_channel()->name, confirm.confidence);
+        /* The winner must also have its carrier centred (a neighbouring
+         * channel sees the VTX aliased several MHz off). */
+        int coff = confirm.offset_khz < 0 ? -confirm.offset_khz : confirm.offset_khz;
+        if (confirm.confidence < ANALOG_VIDEO_MIN_CONFIDENCE || coff > 3000) {
+            printf("[AUTO SEARCH] %s failed confirmation (video=%d offset=%d kHz)\n",
+                   rf_get_current_channel()->name, confirm.confidence,
+                   confirm.offset_khz);
             best_video = -1;
         }
     }

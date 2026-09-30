@@ -5,7 +5,7 @@
 
 analog_video_t analog_video_detect(uint8_t *ep, size_t n, const uint8_t phase[256])
 {
-    analog_video_t out = {0, 0, 0};
+    analog_video_t out = {0, 0, 0, 0};
     if (!ep || !phase || n < (size_t)AVD_LAG_MAX + 257u) return out;
     /* In place: ep[k] becomes the wrapped 50 ns phase step into endpoint
      * k+1 (a signed byte). No extra memory. */
@@ -21,6 +21,8 @@ analog_video_t analog_video_detect(uint8_t *ep, size_t n, const uint8_t phase[25
     int32_t sum = 0;
     for (size_t k = 0; k < n; ++k) sum += d[k];
     int32_t mean_q4 = (int32_t)((sum * 16) / (int32_t)n);
+    /* One Phase8 bin per 50 ns = 20 MHz / 256 = 78.125 kHz. */
+    out.offset_khz = (int)((int64_t)mean_q4 * 78125 / 16000);
     int64_t var = 0;
     for (size_t k = 0; k < n; ++k) {
         int32_t x = d[k] * 16 - mean_q4;

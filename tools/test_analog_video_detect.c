@@ -117,8 +117,8 @@ int main(void)
         int lo = worst(cases[c].sig, cases[c].r, cases[c].line, cases[c].rnd, cases[c].cfo, false);
         int hi = worst(cases[c].sig, cases[c].r, cases[c].line, cases[c].rnd, cases[c].cfo, true);
         analog_video_t a = run(cases[c].sig, cases[c].r, cases[c].line, cases[c].rnd, cases[c].cfo, 1u);
-        printf("%-24s confidence min %4d max %4d  (lag %d std %d)\n",
-               cases[c].name, lo, hi, a.lag, a.standard);
+        printf("%-24s confidence min %4d max %4d  (lag %d std %d offset %d kHz)\n",
+               cases[c].name, lo, hi, a.lag, a.standard, a.offset_khz);
         if (cases[c].must_pass) {
             if (lo < ANALOG_VIDEO_MIN_CONFIDENCE) { puts("  FAIL: must pass"); ++fails; }
             if (a.standard != (cases[c].line == pal ? 1 : 2)) { puts("  FAIL: standard"); ++fails; }
@@ -126,6 +126,22 @@ int main(void)
             puts("  FAIL: must reject");
             ++fails;
         }
+    }
+    /* Carrier centring: the offset estimate follows the CFO (the mean of the
+     * picture adds a fixed bias, so compare two offsets 700 kHz apart). */
+    {
+        analog_video_t c0 = run(SIG_VIDEO, 4.5, pal, true, 0, 3u);
+        analog_video_t c7 = run(SIG_VIDEO, 4.5, pal, true, 7e5, 3u);
+        int step = c7.offset_khz - c0.offset_khz;
+        printf("offset step for +700 kHz CFO: %d kHz\n", step);
+        if (step < 600 || step > 800) { puts("  FAIL: offset estimate"); ++fails; }
+        /* A carrier 15 MHz off (neighbouring channel) aliases to a larger
+         * |offset| than the centred one. */
+        analog_video_t far = run(SIG_VIDEO, 4.5, pal, true, 15e6, 3u);
+        printf("15 MHz off: offset %d kHz, confidence %d\n", far.offset_khz, far.confidence);
+        int ac0 = c0.offset_khz < 0 ? -c0.offset_khz : c0.offset_khz;
+        int afar = far.offset_khz < 0 ? -far.offset_khz : far.offset_khz;
+        if (afar <= ac0 + 2000) { puts("  FAIL: neighbour not further off"); ++fails; }
     }
     assert(fails == 0);
     puts("analog video detect: OK");
