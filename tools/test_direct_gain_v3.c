@@ -64,12 +64,23 @@ int main(void)
     assert(direct_gain_v3_tick(&v3, &multipath) == next);
     assert(v3.writes == 1u);
 
-    /* Saturation drops sensitivity, and carrier loss recovers survival. */
+    /* Saturation drops sensitivity; carrier loss listens at maximum gain
+     * (the table maximum, not the G62 survival trap). */
     dg3_observation_t clipped = obs(50, 105, 0, 200, 90, 400000u);
     uint8_t down = direct_gain_v3_tick(&v3, &clipped);
     assert(down != next && v3.overloads == 1u);
     dg3_observation_t lost = obs(1, 2, 950, 0, 0, 500000u);
-    assert(direct_gain_v3_tick(&v3, &lost) == 62u);
+    assert(direct_gain_v3_tick(&v3, &lost) == table.max_index);
+    /* Still no carrier at maximum gain: stays there, no further writes. */
+    uint32_t lost_writes = v3.writes;
+    for (unsigned k = 0; k < 20u; ++k) {
+        lost.observed_us += 5000u;
+        assert(direct_gain_v3_tick(&v3, &lost) == table.max_index);
+    }
+    assert(v3.writes == lost_writes);
+    /* A strong carrier appearing at maximum gain is dropped at once. */
+    dg3_observation_t strong = obs(60, 110, 0, 300, 90, lost.observed_us + 5000u);
+    assert(direct_gain_v3_tick(&v3, &strong) < table.max_index);
 
     /* Measured tuple response wins over numeric index order. G34 is marked
      * stronger than G35; G33 is the useful measured gain-down destination. */

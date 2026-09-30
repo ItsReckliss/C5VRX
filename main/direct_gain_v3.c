@@ -370,12 +370,20 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
     bool no_carrier = o->p50 <= 4 && o->origin_pm >= 650 && o->coherence < 20;
     bool saturated = o->clip_pm >= 100 || o->p95 >= 95;
     if (no_carrier) {
+        /* No usable carrier: listen at the table's maximum gain, not at the
+         * survival gain (first index of the highest RF stage, G62). A weak
+         * carrier is quantizer-starved at G62 and reads as no carrier, so the
+         * old target was a trap that never explored G63..max (pre-q4-lab.md
+         * far sweep; walk test 2026-09-29, where native AGC reached further).
+         * Without a carrier the maximum still reads P50 1-3 / origin ~90 %,
+         * so this state is stable; a strong carrier appearing here takes the
+         * saturation path below on the next window. */
         v3->state = DG3_ACQUIRE;
         v3->stable_windows = 0;
         v3->high_windows = v3->weak_windows = 0;
         v3->virtual_gain_q8 = 0;
         v3->last_direction = 0;
-        return start_write(v3, o, &prior, v3->survival_gain);
+        return start_write(v3, o, &prior, v3->table.max_index);
     }
     if (v3->state == DG3_SETTLE) {
         /* The freshness guard grows from prior settle measurements. The
