@@ -38,25 +38,37 @@ int main(void)
     }
     assert(v3.writes == 0u && v3.state == DG3_HOLD);
 
-    /* A coherent, origin-heavy weak window selects a physical Fine move. */
-    dg3_observation_t weak = obs(10, 17, 200, 0, 90, 200000u);
-    for (unsigned i = 0; i < 3u; ++i) {
-        weak.observed_us = 197000u + i * 1000u;
-        assert(direct_gain_v3_tick(&v3, &weak) == 35u);
-    }
-    weak.observed_us = 200000u;
+    /* Direct mode: the first coherent, origin-heavy weak window already
+     * selects a physical Fine move (no multi-window wait). */
+    dg3_observation_t weak = obs(10, 17, 200, 0, 90, 199000u);
     uint8_t next = direct_gain_v3_tick(&v3, &weak);
+    assert(next != 35u && v3.writes == 1u);
+    /* Learning needs a stable pre-write pair; run the move once more from a
+     * stable weak history to exercise it. */
+    direct_gain_v3_reset(&v3, &table, 35u, 62u);
+    dg3_observation_t pre = obs(22, 40, 0, 0, 99, 198000u);
+    assert(direct_gain_v3_tick(&v3, &pre) == 35u);          /* in band */
+    weak.observed_us = 199000u;
+    weak.p50 = 22; weak.p95 = 40; weak.origin_pm = 0;       /* same as pre */
+    assert(direct_gain_v3_tick(&v3, &weak) == 35u);          /* still in band */
+    weak = obs(10, 17, 200, 0, 90, 200000u);
+    v3.last_tracking = obs(10, 17, 200, 0, 90, 199500u);     /* stable weak prior */
+    next = direct_gain_v3_tick(&v3, &weak);
     assert(next != 35u && v3.writes == 1u &&
            v3.tuple[next].rf_stage == v3.tuple[35].rf_stage &&
            v3.tuple[next].bb_code == v3.tuple[35].bb_code);
     direct_gain_v3_sync_applied(&v3, next, 200000u);
+    /* One stable window after the physical settle guard verifies. */
     dg3_observation_t settled = obs(17, 28, 30, 0, 91, 200600u);
     assert(direct_gain_v3_tick(&v3, &settled) == next);
-    settled.observed_us += 1000u;
-    assert(direct_gain_v3_tick(&v3, &settled) == next);
-    settled.observed_us += 1000u;
-    assert(direct_gain_v3_tick(&v3, &settled) == next);
     assert(v3.state == DG3_HOLD && v3.verified == 1u && v3.learned == 1u);
+    /* ...and a steady carrier in band stays write-free. */
+    uint32_t steady_writes = v3.writes;
+    for (unsigned k = 0; k < 200u; ++k) {
+        settled.observed_us += 1000u;
+        assert(direct_gain_v3_tick(&v3, &settled) == next);
+    }
+    assert(v3.writes == steady_writes);
     assert(v3.confidence[next] > 0u && v3.settle_us[DG3_FINE] > 0u);
 
     /* Poor phase with a healthy envelope is not a reason to pump gain. */
@@ -89,9 +101,7 @@ int main(void)
     v3.relative_power_q10[33] = 620u;
     v3.confidence[34] = v3.confidence[33] = 3u;
     dg3_observation_t high = obs(40, 55, 0, 0, 95, 600000u);
-    assert(direct_gain_v3_tick(&v3, &high) == 35u);
-    high.observed_us += 1000u;
-    assert(direct_gain_v3_tick(&v3, &high) == 33u);
+    assert(direct_gain_v3_tick(&v3, &high) == 33u);          /* direct */
 
     /* At a Fine boundary, a known BB+Fine tuple is selected directly. */
     direct_gain_v3_reset(&v3, &table, 21u, 62u);
@@ -100,34 +110,24 @@ int main(void)
     v3.relative_power_q10[20] = 700u;
     v3.confidence[20] = 3u;
     high.observed_us += 100000u;
-    assert(direct_gain_v3_tick(&v3, &high) == 21u);
-    high.observed_us += 1000u;
-    assert(direct_gain_v3_tick(&v3, &high) == 20u);
+    assert(direct_gain_v3_tick(&v3, &high) == 20u);          /* direct */
     assert(v3.transition == DG3_BB);
 
     direct_gain_v3_reset(&v3, &table, 35u, 62u);
     v3.bad_state[34] = 3u;
     high.observed_us += 100000u;
-    assert(direct_gain_v3_tick(&v3, &high) == 35u);
-    high.observed_us += 1000u;
-    assert(direct_gain_v3_tick(&v3, &high) != 34u);
+    assert(direct_gain_v3_tick(&v3, &high) != 34u);          /* bad state skipped */
 
     /* A rapidly changing input around the write must not teach a false
      * receiver gain ratio, even if the post-write envelope stabilizes. */
     direct_gain_v3_reset(&v3, &table, 35u, 62u);
-    for (unsigned i = 0; i < 3u; ++i) {
-        weak = obs(10, 17, 200, 0, 90, 800000u + i * 1000u);
-        assert(direct_gain_v3_tick(&v3, &weak) == 35u);
-    }
-    weak = obs(7, 13, 200, 0, 90, 803000u);
+    v3.last_tracking = obs(10, 17, 200, 0, 90, 802000u);
+    weak = obs(7, 13, 200, 0, 90, 803000u);                  /* input moved */
     next = direct_gain_v3_tick(&v3, &weak);
     assert(next != 35u);
     direct_gain_v3_sync_applied(&v3, next, weak.observed_us);
     settled = obs(17, 28, 30, 0, 91, 804000u);
-    for (unsigned i = 0; i < 3u; ++i) {
-        settled.observed_us = 804000u + i * 1000u;
-        assert(direct_gain_v3_tick(&v3, &settled) == next);
-    }
+    assert(direct_gain_v3_tick(&v3, &settled) == next);
     assert(v3.verified == 1u && v3.learned == 0u);
 
     puts("direct gain v3 core: OK");

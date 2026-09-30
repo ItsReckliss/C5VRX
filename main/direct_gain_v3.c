@@ -9,6 +9,14 @@ static uint8_t s_power[256];
 static uint8_t s_flags[256];
 static bool s_lut_ready;
 
+/* Direct mode: act on the first window outside the healthy band and jump
+ * straight to the predicted destination. The healthy band stays a strict
+ * zero-write zone and the per-transition hysteresis is unchanged, so a
+ * steady carrier still gets no gain writes (no per-line pumping). */
+#define DG3_STABLE_WINDOWS 1u   /* was 3 */
+#define DG3_HIGH_WINDOWS   1u   /* was 2 */
+#define DG3_WEAK_WINDOWS   1u   /* was 4 */
+
 static int clamp_i(int value, int low, int high)
 {
     return value < low ? low : value > high ? high : value;
@@ -398,10 +406,10 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
             abs_i((int)o->p95 - (int)v3->previous.p95) <= 4 &&
             abs_i((int)o->origin_pm - (int)v3->previous.origin_pm) <= 60 &&
             abs_i((int)o->coherence - (int)v3->previous.coherence) <= 12) {
-            if (v3->stable_windows < 3u) ++v3->stable_windows;
+            if (v3->stable_windows < DG3_STABLE_WINDOWS) ++v3->stable_windows;
         } else v3->stable_windows = 1u;
         v3->previous = *o;
-        if (v3->stable_windows < 3u) return v3->current_gain;
+        if (v3->stable_windows < DG3_STABLE_WINDOWS) return v3->current_gain;
         uint64_t elapsed = o->observed_us - v3->write_us;
         if (elapsed < 65535u) {
             uint16_t *settle = &v3->settle_us[v3->transition];
@@ -443,13 +451,11 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
         ++v3->holds;
         return v3->current_gain;
     }
-    if (v3->state == DG3_VERIFY && v3->corrections >= 1u) {
-        v3->state = DG3_ACQUIRE;
-        return v3->current_gain;
-    }
-    bool high = o->p50 >= 35 || o->p90 >= 53 || o->p95 > 72 ||
+    /* Act as soon as the envelope leaves the healthy band (13..32), before
+     * it reaches the grainy/collapsing region, not after noise appeared. */
+    bool high = o->p50 > 32 || o->p90 >= 53 || o->p95 > 72 ||
                 o->clip_pm >= 20;
-    bool weak = o->p50 <= 11 && carrier(o);
+    bool weak = o->p50 < 13 && carrier(o);
     /* Schmitt bands retain the previous direction through small envelope
      * fluctuations; they release only after crossing the inner boundary. */
     if (v3->last_direction == 2 &&
@@ -469,33 +475,18 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
         return v3->current_gain;
     }
     if (v3->state != DG3_VERIFY &&
-        ((high && v3->high_windows < 2u) ||
-         (weak && v3->weak_windows < 4u))) return v3->current_gain;
+        ((high && v3->high_windows < DG3_HIGH_WINDOWS) ||
+         (weak && v3->weak_windows < DG3_WEAK_WINDOWS))) return v3->current_gain;
     int target_power = weak ? 17 : 27;
     int error_q8 = power_db_q8((unsigned)target_power) -
                    power_db_q8(o->p50);
-    if (abs_i(error_q8) >= 3 * 256) {
-        /* Predictive path: one large, unsaturated signal change can request
-         * its full relative correction immediately. */
-        v3->virtual_gain_q8 = error_q8;
-    } else if (weak) {
-        /* Release toward more gain slowly to avoid following fading noise. */
-        v3->virtual_gain_q8 += error_q8 / 4;
-    } else {
-        /* Overload attack is faster than gain-up, while saturation already
-         * takes the immediate emergency path above. */
-        v3->virtual_gain_q8 += error_q8 * 3 / 4;
-    }
+    /* Direct: request the full relative correction in one step, both ways. */
+    v3->virtual_gain_q8 = error_q8;
     v3->virtual_gain_q8 = clamp_i(v3->virtual_gain_q8,
                                   -12 * 256, 12 * 256);
     uint8_t target = select_destination(v3, o, weak,
                                         v3->virtual_gain_q8);
     if (target == v3->current_gain) return target;
-    if (v3->state == DG3_VERIFY &&
-        transition_kind(v3, v3->current_gain, target) != DG3_FINE) {
-        v3->state = DG3_ACQUIRE;
-        return v3->current_gain;
-    }
     if (v3->state == DG3_VERIFY) ++v3->corrections;
     v3->high_windows = v3->weak_windows = 0;
     return start_write(v3, o, &prior, target);
