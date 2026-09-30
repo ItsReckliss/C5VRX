@@ -42,6 +42,7 @@
 #include "direct_gain.h"
 #include "direct_gain_v2.h"
 #include "direct_gain_v3.h"
+#include "analog_video_detect.h"
 #include "phase8_gain_lut.h"
 #include "fm_hc_lut.h"
 #include "phase8_envelope.h"
@@ -4237,6 +4238,52 @@ static void init_boot_button(void)
     gpio_config(&cfg);
 }
 
+/* Copy the endpoint bytes (odd ring byte of each pair, as Phase8 reads
+ * them) of the most recent `n` RX-completed pairs, unwrapping the ring. */
+static bool copy_recent_endpoints(uint8_t *dst, size_t n)
+{
+    if (s_rx_dma_ch < 0 || s_rx_dma_ch >= 3 || s_rx_dscr_count < 2 ||
+        2u * n > sizeof(s_raw_ring) / 2u) return false;
+    int idx = find_dscr_index(s_rx_dscr_nodes, s_rx_dscr_count,
+                              AHB_DMA.channel[s_rx_dma_ch].in.in_dscr_bf0.val);
+    if (idx < 0) return false;
+    uint8_t *buf = s_rx_dscr_nodes[idx].buffer;
+    if (buf < s_raw_ring || buf >= s_raw_ring + sizeof(s_raw_ring)) return false;
+    size_t end = (size_t)(buf - s_raw_ring) & ~(size_t)1u;
+    size_t pos = (end + sizeof(s_raw_ring) - 2u * n) % sizeof(s_raw_ring);
+    sync_dma_m2c(s_raw_ring, sizeof(s_raw_ring));
+    for (size_t k = 0; k < n; ++k) {
+        dst[k] = s_raw_ring[pos + 1u];
+        pos = (pos + 2u) % sizeof(s_raw_ring);
+    }
+    return true;
+}
+
+/* Issue #128: median analog-video confidence of three windows of ~4096
+ * endpoints on the current channel (analog_video_detect.c). The window is
+ * heap-allocated only for the duration of a scan: static buffers took the
+ * internal heap the standalone menu needs (ESP_ERR_NO_MEM). */
+#define SCAN_VIDEO_PAIRS 4092u
+static uint8_t *s_scan_video_buf;
+
+static analog_video_t scan_video_confidence(void)
+{
+    analog_video_t v[3] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    if (!s_scan_video_buf) return v[0];
+    for (unsigned w = 0; w < 3u; ++w) {
+        if (w) vTaskDelay(pdMS_TO_TICKS(10));
+        if (copy_recent_endpoints(s_scan_video_buf, SCAN_VIDEO_PAIRS))
+            v[w] = analog_video_detect(s_scan_video_buf, SCAN_VIDEO_PAIRS,
+                                       c5vrx_phase8_gain_lut);
+    }
+    /* median by confidence */
+    analog_video_t a = v[0], b = v[1], c = v[2], t;
+    if (a.confidence > b.confidence) { t = a; a = b; b = t; }
+    if (b.confidence > c.confidence) { t = b; b = c; c = t; }
+    if (a.confidence > b.confidence) { t = a; a = b; b = t; }
+    return b;
+}
+
 static void channel_auto_search(void)
 {
     const size_t original_channel = rf_get_channel_index();
@@ -4245,11 +4292,22 @@ static void channel_auto_search(void)
     size_t best_channel = original_channel;
     int best_rank = -1;
     int best_quality = 0;
+    int best_video = -1;
+    int best_offset = 0x7fffffff;
+    const uint8_t max_gain = rf_get_arc_gain_table()->max_index;
 
     s_channel_scan_active = true;
     s_channel_scan_progress = 0;
     rf_set_rx_gain(true, 52u); /* Compare every channel at the same RF gain. */
+    s_scan_video_buf = heap_caps_malloc(SCAN_VIDEO_PAIRS, MALLOC_CAP_INTERNAL);
+    if (!s_scan_video_buf)
+        printf("[AUTO SEARCH] no memory for the video check; channel kept\n");
 
+    /* Issue #128: RF strength alone let 5 GHz Wi-Fi win (and pull the scan
+     * into the L band). A channel only qualifies with analog-video
+     * confidence (line-period periodicity); RF quality only breaks ties. A
+     * channel starved at gain 52 (far VTX) is re-measured at maximum gain so
+     * a weak but real VTX is not missed. */
     for (size_t channel = 0; channel < channel_count; ++channel) {
         if (rf_set_channel(channel) != ESP_OK) continue;
         vTaskDelay(pdMS_TO_TICKS(90));
@@ -4270,17 +4328,70 @@ static void channel_auto_search(void)
             metrics.strong_winding_permille, metrics.iq_skew_permille,
             metrics.iq_cross_permille, 0, active_demod_shadow(metrics.fusion_shadow));
         int rank = scan_fusion.quality + quality * 2;
-        if (scan_fusion.context != FUSION_CONTEXT_NO_CARRIER &&
-            metrics.q_phase >= 22 && rank > best_rank) {
-            best_rank = rank;
-            best_channel = channel;
-            best_quality = quality;
+        analog_video_t video = scan_video_confidence();
+        if (video.confidence < ANALOG_VIDEO_MIN_CONFIDENCE &&
+            metrics.origin_permille > 500) {
+            rf_set_rx_gain(true, max_gain);
+            vTaskDelay(pdMS_TO_TICKS(20));
+            analog_video_t far = scan_video_confidence();
+            rf_set_rx_gain(true, 52u);
+            if (far.confidence > video.confidence) video = far;
+        }
+        if (video.confidence >= ANALOG_VIDEO_MIN_CONFIDENCE) {
+            int off = video.offset_khz < 0 ? -video.offset_khz : video.offset_khz;
+            printf("[AUTO SEARCH] candidate %s (%u MHz): video=%d offset=%d kHz lag=%d %s rf=%d\n",
+                   rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz,
+                   video.confidence, video.offset_khz, video.lag,
+                   video.standard == 1 ? "PAL" : "NTSC", rank);
+            /* The BW40 filter lets a VTX through on neighbouring channels
+             * too (hardware: A1's VTX gave valid video on B8/F7/F8/R7), and
+             * the confidence ignores offset by design. Choose the channel
+             * the carrier is centred on: smallest |offset| (500 kHz
+             * buckets), then confidence, then RF rank. */
+            int off_bucket = off / 500;
+            int best_bucket = best_offset / 500;
+            if (off_bucket < best_bucket ||
+                (off_bucket == best_bucket &&
+                 (video.confidence > best_video ||
+                  (video.confidence == best_video && rank > best_rank)))) {
+                best_offset = off;
+                best_video = video.confidence;
+                best_rank = rank;
+                best_channel = channel;
+                best_quality = quality;
+            }
         }
         s_channel_scan_progress = (unsigned)((channel + 1u) * 100u / channel_count);
         menu_render_menu();
     }
 
-    if (best_rank < 0) best_channel = original_channel;
+    /* Confirm the winner before committing; otherwise keep the channel. */
+    if (best_video >= 0) {
+        (void)rf_set_channel(best_channel);
+        vTaskDelay(pdMS_TO_TICKS(90));
+        analog_video_t confirm = scan_video_confidence();
+        if (confirm.confidence < ANALOG_VIDEO_MIN_CONFIDENCE) {
+            rf_set_rx_gain(true, max_gain);
+            vTaskDelay(pdMS_TO_TICKS(20));
+            analog_video_t far = scan_video_confidence();
+            if (far.confidence > confirm.confidence) confirm = far;
+        }
+        /* The winner must also have its carrier centred (a neighbouring
+         * channel sees the VTX aliased several MHz off). */
+        int coff = confirm.offset_khz < 0 ? -confirm.offset_khz : confirm.offset_khz;
+        if (confirm.confidence < ANALOG_VIDEO_MIN_CONFIDENCE || coff > 3000) {
+            printf("[AUTO SEARCH] %s failed confirmation (video=%d offset=%d kHz)\n",
+                   rf_get_current_channel()->name, confirm.confidence,
+                   confirm.offset_khz);
+            best_video = -1;
+        }
+    }
+    if (best_video < 0) {
+        best_channel = original_channel;
+        best_rank = -1;
+    }
+    heap_caps_free(s_scan_video_buf);
+    s_scan_video_buf = NULL;
     (void)rf_set_channel(best_channel);
     rf_set_rx_gain(true, original_gain);
     ++s_profile_generation;
@@ -4293,7 +4404,7 @@ static void channel_auto_search(void)
     settings_save();
     menu_render_menu();
     printf("[AUTO SEARCH] %s -> %s (%u MHz), signal=%d\n",
-           best_rank < 0 ? "No carrier; restored" : "Selected",
+           best_rank < 0 ? "No analog video found; restored" : "Selected",
            rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz,
            s_signal_strength);
 }
