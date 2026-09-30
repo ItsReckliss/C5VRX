@@ -11,7 +11,9 @@
 - Native AGC remains a user requirement for the experimental receiver; paced
   native operation is a comparison candidate. The main build's gain policy
   must not be mistaken for this experimental design decision.
-- No demodulator or firmware implementation until the architecture is justified.
+- The operator subsequently authorized an isolated experimental build. The
+  existing-board span-75 prototype is implemented for comparison; it is not
+  a demonstrated choice for the final long-range architecture.
 
 ## Architecture candidates
 
@@ -53,5 +55,21 @@ rejected it as an adequate final solution.
   weak/strong gain recovery or extended usable range.
 
 See [RESEARCH.md](RESEARCH.md) for calculations, primary references, source
-revisions and corrected assumptions. No external processor, gain value,
-bandwidth, lane set or claimed sensitivity gain is selected yet.
+revisions and corrected assumptions. The prototype uses coarse I4/Q4 lanes,
+native AGC with a 1 ms hold cadence and 20 us acquisition window, and fine-stage
+setting 127. These are experimental starting settings, not measured optima.
+No external processor or claimed sensitivity gain is selected yet. See
+[README.md](README.md) for the implementation and build instructions.
+
+## Prototype limits and recommendation
+
+Keep C5VRX-3 as the working receiver and comparison reference. C5VRX-4 has no
+measured range advantage. Its three-sample endpoint phase difference can reduce
+some noise, but has less frequency-offset headroom and more attenuation near
+the colour subcarrier. Phase6 also retains less angle precision than Phase8.
+The DAC mapping uses nominal resistor values, not a measured board calibration.
+
+This prototype does not implement full-range I6/Q6 capture, complex filtering,
+a tracking FM demodulator or matched de-emphasis. Those require separate design
+work; whether additional processing hardware is acceptable remains unresolved.
+The current source has not been flashed or evaluated on hardware.

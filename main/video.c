@@ -28,6 +28,9 @@
  */
 
 #include "video.h"
+#ifdef C5VRX4_EXPERIMENT
+#include "c5vrx4.h"
+#endif
 #include "rf.h"
 #include "menu_font.h"
 #include "menu_raster.h"
@@ -147,6 +150,9 @@ BITSCRAMBLER_PROGRAM(s_fm_phase5_360_program, "fm_phase5_360");
 BITSCRAMBLER_PROGRAM(s_fm_phase8_hr_live_program, "fm_phase8_hr_live");
 BITSCRAMBLER_PROGRAM(s_fm_fsm_capture_program, "fm_phase5_fsm_capture");
 BITSCRAMBLER_PROGRAM(s_fm4_program, "fm4");
+#ifdef C5VRX4_EXPERIMENT
+BITSCRAMBLER_PROGRAM(s_c5vrx4_program, "c5vrx4_span75");
+#endif
 
 /* ----- Fixed production constants ----- */
 #define IQ_RATE_HZ       40000000u   /* MODEM_DIAG / PARLIO RX clock */
@@ -1212,6 +1218,9 @@ static const char *output_mode_name(void)
 
 static const char *demod_mode_name(void)
 {
+#ifdef C5VRX4_EXPERIMENT
+    return "C5V4 SPAN75";
+#endif
 #if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
     return "PHASE8 HR TEST";
 #endif
@@ -1311,7 +1320,11 @@ static volatile bool s_rssi_probe_active;
 static const int8_t s_lab_fft_values[] = {16, 24, 32, 40};
 
 #define SETTINGS_VERSION 4u
+#ifdef C5VRX4_EXPERIMENT
+#define SETTINGS_NAMESPACE "c5vrx4"
+#else
 #define SETTINGS_NAMESPACE "c5vrx"
+#endif
 #define SETTINGS_KEY "settings"
 
 typedef struct {
@@ -3845,7 +3858,10 @@ static void quiet_tx_interrupts(void)
 static void start_flight_demodulator(void)
 {
     ESP_ERROR_CHECK(bitscrambler_enable(s_flight_bs));
-#if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
+#ifdef C5VRX4_EXPERIMENT
+    ESP_ERROR_CHECK(s_output_mode == VIDEO_OUTPUT_6BIT_40 ? ESP_OK : ESP_ERR_INVALID_STATE);
+    ESP_ERROR_CHECK(bitscrambler_load_program(s_flight_bs, s_c5vrx4_program));
+#elif CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
     ESP_ERROR_CHECK(s_output_mode == VIDEO_OUTPUT_6BIT_40 ?
                     ESP_OK : ESP_ERR_INVALID_STATE);
     ESP_ERROR_CHECK(bitscrambler_load_program(s_flight_bs,
@@ -4298,7 +4314,9 @@ static void handle_button_long_click(void)
             settings_save();
             break;
         case 4: /* VIDEO OUTPUT */
-#if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
+#ifdef C5VRX4_EXPERIMENT
+            printf("[MENU: OUTPUT] 6BIT@40 fixed for C5V4 SPAN75\n");
+#elif CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
             printf("[MENU: OUTPUT] 6BIT@40 fixed for PHASE8 HR TEST\n");
 #else
             s_output_mode = s_output_mode == VIDEO_OUTPUT_6BIT_40 ?
@@ -5089,6 +5107,9 @@ static void console_diag_task(void *arg)
             if (usb_serial_jtag_ll_read_rxfifo(&byte, 1) == 0) break;
             int c = byte;
             if (c != EOF && c > 0) {
+#ifdef C5VRX4_EXPERIMENT
+                if (c5vrx4_console(c)) continue;
+#endif
                 if (s_gain_sweep.active &&
                     c != 'g' && c != 'l' && c != 'L' && c != '\r' && c != '\n') {
                     printf("C5VRX_GAIN_SWEEP_BUSY command=0x%02x action=ignored\n", (unsigned)c);
@@ -5509,7 +5530,7 @@ esp_err_t video_start(void)
     if (!s_menu_commands) return ESP_ERR_NO_MEM;
 
     settings_load();
-#if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
+#if defined(C5VRX4_EXPERIMENT) || CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
     s_output_mode = VIDEO_OUTPUT_6BIT_40;
 #endif
     apply_rx_profile(s_rx_profile);
@@ -5615,6 +5636,11 @@ esp_err_t video_start(void)
 
 
     /* Print startup stamp (visible on serial monitor at boot). */
+#ifdef C5VRX4_EXPERIMENT
+    ESP_EARLY_LOGW(TAG, "C5VRX-4 SPAN75: IQ40M -> Phase6 -> DAC13.333M "
+                   "[D,D,D]@40M native AGC; descriptors RX=%d TX=%d; "
+                   "experimental, no range claim", rx_nodes, tx_nodes);
+#else
     ESP_EARLY_LOGW(TAG,
         "\n=======================================================\n"
         " C5VRX-3  Seamless 32K Phase5 receiver (Zero-EOF Circular GDMA)\n"
@@ -5628,6 +5654,7 @@ esp_err_t video_start(void)
         " CPU:     done (hardware runs in unbroken infinite loop)\n"
         "=======================================================\n",
         s_rx_dma_ch, s_tx_dma_ch, rx_nodes, tx_nodes, DAC_IDLE_CODE, 2u);
+#endif
 
     return ESP_OK;
 }

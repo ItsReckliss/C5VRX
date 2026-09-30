@@ -11,6 +11,9 @@
  */
 
 #include "rf.h"
+#ifdef C5VRX4_EXPERIMENT
+#include "c5vrx4.h"
+#endif
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -323,6 +326,9 @@ esp_err_t rf_prepare_fresh_phy_calibration(void)
 
 static bool native_agc_boot_requested(void)
 {
+#ifdef C5VRX4_EXPERIMENT
+    return true; /* Experiment owns its boot policy; do not modify main NVS. */
+#else
     nvs_handle_t handle;
     uint8_t value = 0;
     if (nvs_open(NATIVE_AGC_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
@@ -330,10 +336,14 @@ static bool native_agc_boot_requested(void)
     if (nvs_get_u8(handle, NATIVE_AGC_NVS_KEY, &value) != ESP_OK) value = 0;
     nvs_close(handle);
     return value == 1u;
+#endif
 }
 
 esp_err_t rf_request_native_agc_boot(bool enable)
 {
+#ifdef C5VRX4_EXPERIMENT
+    return enable ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
+#else
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NATIVE_AGC_NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) return err;
@@ -341,6 +351,7 @@ esp_err_t rf_request_native_agc_boot(bool enable)
     if (err == ESP_OK) err = nvs_commit(handle);
     nvs_close(handle);
     return err;
+#endif
 }
 
 bool rf_native_agc_active(void)
@@ -613,8 +624,14 @@ static bool plan_wifi5_center(uint16_t freq_mhz, uint8_t *channel, uint16_t *cen
 
 void rf_set_analog_bandwidth(bool bw40)
 {
+#ifdef C5VRX4_EXPERIMENT
+    c5vrx4_suspend();
+#endif
     s_analog_bw40 = bw40;
     phy_wifi_fbw_sel(bw40 ? 1u : 0u);
+#ifdef C5VRX4_EXPERIMENT
+    c5vrx4_resume();
+#endif
 }
 
 bool rf_get_analog_bandwidth(void)
@@ -775,8 +792,14 @@ void rf_set_frequency_offset_khz(int offset_khz)
     if (offset_khz > 1500)  offset_khz = 1500;
 
     s_current_offset_khz = offset_khz;
+#ifdef C5VRX4_EXPERIMENT
+    c5vrx4_suspend();
+#endif
     phy_chip_set_chan_offset(offset_khz);
     if (!s_native_agc) phy_force_rx_gain(true, s_current_gain_val);
+#ifdef C5VRX4_EXPERIMENT
+    c5vrx4_resume();
+#endif
 }
 
 void rf_step_frequency_offset_khz(int delta_khz)
@@ -784,7 +807,7 @@ void rf_step_frequency_offset_khz(int delta_khz)
     rf_set_frequency_offset_khz(s_current_offset_khz + delta_khz);
 }
 
-esp_err_t rf_set_channel(size_t index)
+static esp_err_t rf_set_channel_impl(size_t index)
 {
     if (index >= FPV_BAND_COUNT * 8u) {
         return ESP_ERR_INVALID_ARG;
@@ -849,6 +872,18 @@ esp_err_t rf_set_channel(size_t index)
     s_current_offset_khz = 0;
 
     return ESP_OK;
+}
+
+esp_err_t rf_set_channel(size_t index)
+{
+#ifdef C5VRX4_EXPERIMENT
+    c5vrx4_suspend();
+#endif
+    esp_err_t err = rf_set_channel_impl(index);
+#ifdef C5VRX4_EXPERIMENT
+    c5vrx4_resume();
+#endif
+    return err;
 }
 
 esp_err_t rf_cycle_channel(void)
