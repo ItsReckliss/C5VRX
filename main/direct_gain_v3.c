@@ -34,6 +34,13 @@ static bool s_lut_ready;
  * completed RX descriptor (~102 us) can still hold pre-switch samples, so
  * two descriptor periods are skipped before measuring. */
 #define DG3_LANE_GUARD_US   250u
+/* Soft fold evidence (rail codes, wide junk) must persist this many windows:
+ * a strong carrier arriving persists, a short interference burst does not
+ * (hardware, VTX off: ~9 single-window bursts/s on ultrafine). Hard
+ * saturation still drops at once. After a fold drop the lanes are not
+ * re-entered for DG3_LANE_HOLD_US. */
+#define DG3_JUNK_WINDOWS    2u
+#define DG3_LANE_HOLD_US    5000u
 
 static int clamp_i(int value, int low, int high)
 {
@@ -484,13 +491,20 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
      * junk (rail codes, large P95) rather than as quiet noise. Either one
      * returns to the coarse lanes at once; the analog loop then sees the
      * true level on the next window. */
-    if (v3->lane &&
-        (saturated || o->clip_pm >= 20 || o->p95 > 72 ||
-         (!carrier(o) && !no_carrier && o->p95 >= 53))) {
+    bool junk = o->clip_pm >= 20 || o->p95 > 72 ||
+                (!carrier(o) && !no_carrier && o->p95 >= 53);
+    if (v3->lane && (saturated || junk)) {
+        if (!saturated && ++v3->junk_windows < DG3_JUNK_WINDOWS)
+            return v3->current_gain;
         ++v3->fold_drops;
+        v3->junk_windows = 0;
+        v3->lane_hold_until_us = o->observed_us + DG3_LANE_HOLD_US;
         return set_lane(v3, o, 0u);
     }
-    if (no_carrier && at_max && v3->lane < v3->lane_max) {
+    v3->junk_windows = 0;
+    bool lane_up_ok = at_max && v3->lane < v3->lane_max &&
+                      o->observed_us >= v3->lane_hold_until_us;
+    if (no_carrier && lane_up_ok) {
         /* Listen on the finest lane: a carrier below one coarse step becomes
          * visible there. A strong carrier appearing is caught by the fold
          * guard above. */
@@ -567,7 +581,7 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
     /* Starved at maximum analog gain: the envelope sits in the few cells
      * around the origin, too small even to prove a carrier. Step to the
      * finest lane that keeps it in band (no rail codes, so no fold risk). */
-    if (at_max && v3->lane < v3->lane_max && v3->state != DG3_SETTLE &&
+    if (lane_up_ok && v3->state != DG3_SETTLE &&
         o->p50 < 13 && o->clip_pm < 20 && o->p95 < 53) {
         uint8_t lane = lane_for(v3, o, true);
         if (lane == v3->lane) lane = (uint8_t)(v3->lane + 1u);

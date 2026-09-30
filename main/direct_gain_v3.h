@@ -58,8 +58,8 @@ typedef struct {
      * Lane k scales the Q4 amplitude by exactly 2^k (power 4^k). Lanes are
      * entered only at the table's maximum analog gain; after that the analog
      * gain fine-tunes between the 6 dB lane steps. */
-    uint8_t lane, lane_max;
-    uint64_t lane_us;
+    uint8_t lane, lane_max, junk_windows;
+    uint64_t lane_us, lane_hold_until_us;
     uint32_t lane_changes, fold_drops;
 } direct_gain_v3_t;
 

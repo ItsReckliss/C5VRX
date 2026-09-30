@@ -174,16 +174,33 @@ int main(void)
         /* Windows that may hold pre-switch samples are ignored. */
         dg3_observation_t early = obs(60, 110, 0, 300, 90, t + 100u);
         assert(direct_gain_v3_tick(&v3, &early) == max && v3.lane == 2u);
-        /* Rail codes on a finer lane: back to coarse at once. */
+        /* A single-window burst of rail codes is ignored ... */
         dg3_observation_t rail = obs(30, 70, 0, 40, 95, t += 1000u);
         uint32_t drops = v3.fold_drops;
+        assert(direct_gain_v3_tick(&v3, &rail) == max && v3.lane == 2u);
+        dg3_observation_t quiet = obs(8, 20, 300, 0, 30, t += 200u);
+        (void)direct_gain_v3_tick(&v3, &quiet);
+        assert(v3.lane == 2u && v3.junk_windows == 0u);
+        /* ... persisting rail codes drop to coarse. */
+        rail.observed_us = t += 200u;
+        (void)direct_gain_v3_tick(&v3, &rail);
+        rail.observed_us = t += 200u;
         assert(direct_gain_v3_tick(&v3, &rail) == max && v3.lane == 0u);
         assert(v3.fold_drops == drops + 1u);
+        /* Re-entry is held off for 5 ms after a fold drop. */
+        dg3_observation_t none0 = obs(1, 3, 980, 0, 5, t += 1000u);
+        (void)direct_gain_v3_tick(&v3, &none0);
+        assert(v3.lane == 0u);
+        none0.observed_us = t += 5000u;
+        (void)direct_gain_v3_tick(&v3, &none0);
+        assert(v3.lane == 2u);
 
         /* Folded junk (incoherent, wide, not quiet) also drops the lane. */
         direct_gain_v3_enable_lanes(&v3, 2u);
         v3.lane = 2u; v3.lane_us = 0u;
         dg3_observation_t junk = obs(20, 60, 100, 10, 12, t += 1000u);
+        (void)direct_gain_v3_tick(&v3, &junk);
+        junk.observed_us = t += 200u;
         assert(direct_gain_v3_tick(&v3, &junk) == max && v3.lane == 0u);
 
         /* P50 12 cannot land in the <6 dB band: take one lane (48) and let
