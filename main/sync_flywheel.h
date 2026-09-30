@@ -57,13 +57,15 @@ typedef struct {
 
 void sfw_init(sync_flywheel_t *f);
 
-/* Process every predicted line whose analysis window lies before avail_end
- * (absolute pair index, exclusive: data RX has completed). Writes only to
- * pairs >= write_floor (ahead of the TX read position). Returns lines
- * processed. max_scan bounds acquisition work per call. */
+/* Process predicted lines whose analysis window lies before avail_end
+ * (absolute pair index, exclusive: data RX has completed), at most
+ * max_lines per call (the rest carries over). Writes only to pairs >=
+ * write_floor (ahead of the TX read position). Returns lines processed.
+ * max_scan bounds acquisition work per call; the caller also rate-limits
+ * acquisition calls so a missing signal never starves the CPU. */
 unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
                  uint64_t write_floor, bool allow_repair, bool allow_colour_kill,
-                 uint32_t max_scan);
+                 uint32_t max_scan, unsigned max_lines);
 
 bool sfw_locked(const sync_flywheel_t *f);
 /* 1 = PAL, 2 = NTSC, 0 = unknown (from the tracked line period). */

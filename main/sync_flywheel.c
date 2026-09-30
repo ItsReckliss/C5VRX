@@ -297,7 +297,7 @@ static bool plausible_pulse(unsigned width, unsigned inside)
 
 unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
                  uint64_t write_floor, bool allow_repair, bool allow_colour_kill,
-                 uint32_t max_scan)
+                 uint32_t max_scan, unsigned max_lines)
 {
     if (!f || !r || !r->ring || !r->phase || !r->ring_pairs ||
         (r->ring_pairs & (r->ring_pairs - 1u))) return 0;
@@ -309,7 +309,7 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
         if (f->state == SFW_ACQUIRE) return 0;
     }
     unsigned processed = 0;
-    while (f->state == SFW_TRACK) {
+    while (f->state == SFW_TRACK && processed < max_lines) {
         uint64_t pred = (f->next_q8 + 128u) >> 8;
         if (pred + SFW_WIN_UNLOCKED + SFW_SPAN + 600u > avail_end) break;
         if (pred + r->ring_pairs / 2u < avail_end) {

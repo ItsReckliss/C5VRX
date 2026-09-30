@@ -100,7 +100,7 @@ static void run_case(bool hc, const levels_t *lv)
         }
         rx += CHUNK;
         size_t tx_now = rx > TX_LAG ? rx - TX_LAG : 0;
-        sfw_run(&f, &r, rx, tx_now + 256u, true, true, 4096u);
+        sfw_run(&f, &r, rx, tx_now + 256u, true, true, 4096u, 1000u);
         locked_seen |= sfw_locked(&f);
         int sync_code = (f.sync_q4 + 8) >> 4;
         for (size_t k = tx; k < tx_now; ++k) {

@@ -298,7 +298,7 @@ static volatile bool s_sfw_enabled = true, s_sfw_colour_kill = true;
 /* History-conditioned demodulator (fm_hc.bsasm), chosen per boot from NVS
  * c5vrx/hc_demod = 1 ('P' toggles and reboots). Default Phase8 FULL. */
 static bool s_hc_demod;
-static volatile uint32_t s_sfw_rebases;
+static volatile uint32_t s_sfw_rebases, s_sfw_max_us, s_sfw_last_us;
 #endif
 static TaskHandle_t s_v3_sentinel_task_handle;
 static esp_timer_handle_t s_v3_sentinel_timer;
@@ -1730,11 +1730,23 @@ static void sync_flywheel_task(void *arg)
         last_us = now;
         uint64_t lag = ((rx_off - tx_off) & (RAW_RING_BYTES - 1u)) / 2u;
         uint64_t floor = rx_abs - lag + s_tx_dscr_nodes[ti].length / 2u + 128u;
+        /* Acquisition scans only ~two lines every 5 ms; tracking handles at
+         * most 6 lines per wake (~3 arrive per 200 us). A missing signal
+         * must never starve the console or other tasks. */
+        static int64_t last_acq_us;
+        if (s_sfw.state == SFW_ACQUIRE) {
+            if (now - last_acq_us < 5000) continue;
+            last_acq_us = now;
+        }
         sync_dma_m2c(s_raw_ring, RAW_RING_BYTES);
         uint32_t repaired = s_sfw.repaired;
         bool kill = s_sfw.colour_kill;
+        int64_t t0 = esp_timer_get_time();
         (void)sfw_run(&s_sfw, &ring, rx_abs, floor, true, s_sfw_colour_kill,
-                      4096u);
+                      2800u, 6u);
+        uint32_t spent = (uint32_t)(esp_timer_get_time() - t0);
+        s_sfw_last_us = spent;
+        if (spent > s_sfw_max_us) s_sfw_max_us = spent;
         if (s_sfw.repaired != repaired || kill || s_sfw.colour_kill)
             sync_dma_c2m(s_raw_ring, RAW_RING_BYTES);
         int std = sfw_standard(&s_sfw);
@@ -2165,7 +2177,7 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
     printf("SFW enabled=%u locked=%u std=%d state=%u lines=%lu clean=%lu "
            "repaired=%lu missed=%lu vsyncs=%lu acq=%lu thr=%u sync_q4=%u "
            "blank_q4=%u period_q8=%ld colour_kill=%u kill_events=%lu "
-           "floor_skips=%lu rebases=%lu\n",
+           "floor_skips=%lu rebases=%lu run_us=%lu run_max_us=%lu\n",
            s_sfw_enabled ? 1u : 0u, sfw_locked(&s_sfw) ? 1u : 0u,
            sfw_standard(&s_sfw), (unsigned)s_sfw.state,
            (unsigned long)s_sfw.lines, (unsigned long)s_sfw.clean,
@@ -2173,7 +2185,8 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            (unsigned long)s_sfw.vsyncs, (unsigned long)s_sfw.acquisitions,
            s_sfw.thr, s_sfw.sync_q4, s_sfw.blank_q4, (long)s_sfw.period_q8,
            s_sfw.colour_kill ? 1u : 0u, (unsigned long)s_sfw.kill_on_events,
-           (unsigned long)s_sfw.skipped_floor, (unsigned long)s_sfw_rebases);
+           (unsigned long)s_sfw.skipped_floor, (unsigned long)s_sfw_rebases,
+           (unsigned long)s_sfw_last_us, (unsigned long)s_sfw_max_us);
 #endif
 }
 
