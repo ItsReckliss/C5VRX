@@ -30,6 +30,29 @@ static bool s_lut_ready;
 #define DG3_REVERSALS_ARM   2u
 #define DG3_DAMP_US        200000u
 #define DG3_DAMPED_WINDOWS  8u   /* ~1.6 ms at the 200 us cadence */
+/* Range lanes. A lane switch is an instant GPIO remap, but the newest
+ * completed RX descriptor (~102 us) can still hold pre-switch samples, so
+ * two descriptor periods are skipped before measuring. */
+#define DG3_LANE_GUARD_US   250u
+/* Soft fold evidence (rail codes, wide junk) must persist this many windows:
+ * a strong carrier arriving persists, a short interference burst does not
+ * (hardware, VTX off: ~9 single-window bursts/s on ultrafine). Hard
+ * saturation still drops at once. After a fold drop the lanes are not
+ * re-entered for DG3_LANE_HOLD_US. */
+#define DG3_JUNK_WINDOWS    2u
+/* The power metric is r^2 + ~1 (bucket centres), so lane scaling is exact
+ * on r^2 = P50 - 1. Target median noise r^2 ~1.25 step^2, i.e. sigma ~0.95
+ * step per axis, where the 4-bit quantizer is effectively linear (Widrow:
+ * the loss is already small from ~0.5 step). Q4 fixed point. */
+#define DG3_NOISE_R2_TARGET_Q4 20u
+#define DG3_LANE_HOLD_US    5000u
+/* Hysteresis between entering a lane and its fold guard: a lane is entered
+ * only if the scaled P95 keeps real headroom below the drop thresholds
+ * (rail codes >= 20 permille / P95 > 72). Hardware: a weak carrier entered
+ * at scaled P95 ~60 on ultrafine touched the rail ~150 times/s and hunted.
+ * Each further fold drop within 2 s doubles the hold-off (up to ~1.3 s). */
+#define DG3_LANE_UP_P95     45u
+#define DG3_FOLD_STREAK_US  2000000u
 
 static int clamp_i(int value, int low, int high)
 {
@@ -249,16 +272,13 @@ static uint8_t adjacent_physical(const direct_gain_v3_t *v3, bool up)
     return best;
 }
 
+/* Overload: remove late (BB) gain first. The RF stage sets the noise
+ * figure, and an outer-cell/rail reading cannot tell front-end compression
+ * from BB/ADC overdrive; if the envelope is still saturated one window later
+ * the next emergency drop takes the RF stage. */
 static uint8_t emergency_drop(const direct_gain_v3_t *v3)
 {
     const arc_gain_tuple_t *current = &v3->tuple[v3->current_gain];
-    if (current->rf_stage > 0u) {
-        for (unsigned g = 20u; g <= v3->table.max_index; ++g) {
-            const arc_gain_tuple_t *t = &v3->tuple[g];
-            if (t->rf_stage + 1u == current->rf_stage &&
-                t->bb_code == 1u && t->fine_code == 5u) return (uint8_t)g;
-        }
-    }
     if (current->bb_code > 1u) {
         unsigned lower_bb = (current->bb_code - 1u) / 2u;
         for (unsigned g = 20u; g <= v3->table.max_index; ++g) {
@@ -266,6 +286,13 @@ static uint8_t emergency_drop(const direct_gain_v3_t *v3)
             if (t->rf_stage == current->rf_stage &&
                 t->bb_code == lower_bb && t->fine_code == 5u)
                 return (uint8_t)g;
+        }
+    }
+    if (current->rf_stage > 0u) {
+        for (unsigned g = 20u; g <= v3->table.max_index; ++g) {
+            const arc_gain_tuple_t *t = &v3->tuple[g];
+            if (t->rf_stage + 1u == current->rf_stage &&
+                t->bb_code == 1u && t->fine_code == 5u) return (uint8_t)g;
         }
     }
     return adjacent_physical(v3, false);
@@ -358,13 +385,8 @@ static void learn_transition(direct_gain_v3_t *v3,
     ++v3->learned;
 }
 
-static uint8_t start_write(direct_gain_v3_t *v3,
-                           const dg3_observation_t *o,
-                           const dg3_observation_t *prior, uint8_t target)
+static void note_direction(direct_gain_v3_t *v3, int8_t dir, uint64_t now)
 {
-    if (target == v3->current_gain) return target;
-    int8_t dir = target > v3->current_gain ? 1 : -1;
-    uint64_t now = o->observed_us;
     if (v3->last_write_dir && dir != v3->last_write_dir &&
         now >= v3->dir_write_us && now - v3->dir_write_us < DG3_REVERSAL_US) {
         if (++v3->reversals >= DG3_REVERSALS_ARM) {
@@ -377,6 +399,97 @@ static uint8_t start_write(direct_gain_v3_t *v3,
     }
     v3->last_write_dir = dir;
     v3->dir_write_us = now;
+}
+
+/* Range lanes: exact 2^k amplitude steps, so no learning or settle model.
+ * Only the tracking state is cleared; the analog gain is untouched. */
+static uint8_t set_lane(direct_gain_v3_t *v3, const dg3_observation_t *o,
+                        uint8_t lane)
+{
+    if (lane > v3->lane_max) lane = v3->lane_max;
+    if (lane == v3->lane) return v3->current_gain;
+    note_direction(v3, lane > v3->lane ? 1 : -1, o->observed_us);
+    v3->lane = lane;
+    v3->lane_us = o->observed_us;
+    ++v3->lane_changes;
+    v3->high_windows = v3->weak_windows = 0;
+    v3->virtual_gain_q8 = 0;
+    v3->last_direction = 0;
+    v3->stable_windows = 0;
+    /* An analog write still settling would now compare envelopes from two
+     * lanes: invalidate its reference so nothing is learned from it. */
+    if (v3->state == DG3_SETTLE) v3->before.p50 = 0u;
+    else v3->state = DG3_VERIFY;
+    return v3->current_gain;
+}
+
+static unsigned scale_power(unsigned power, int lanes)
+{
+    while (lanes > 0) { power *= 4u; --lanes; }
+    while (lanes < 0) { power /= 4u; ++lanes; }
+    return power > 113u ? 113u : power;
+}
+
+/* Finest lane step (up) or smallest step (down) that lands the envelope in
+ * the healthy band; returns the new lane. */
+static uint8_t lane_for(const direct_gain_v3_t *v3,
+                        const dg3_observation_t *o, bool up)
+{
+    if (up) {
+        int top = (int)v3->lane_cap - (int)v3->lane;
+        for (int k = top; k >= 1; --k) {
+            unsigned p50 = scale_power(o->p50, k), p95 = scale_power(o->p95, k);
+            if (p50 <= 32u && p95 <= DG3_LANE_UP_P95) return (uint8_t)(v3->lane + k);
+        }
+        /* No lane lands inside the (<6 dB wide) band: take the smallest
+         * step that reaches it without rail codes; the analog gain then
+         * trims the overshoot down in its fine steps. */
+        for (int k = 1; k <= top; ++k) {
+            unsigned p50 = scale_power(o->p50, k), p95 = scale_power(o->p95, k);
+            if (p50 >= 13u && p95 <= DG3_LANE_UP_P95) return (uint8_t)(v3->lane + k);
+        }
+        return v3->lane;
+    }
+    for (int k = 1; k <= (int)v3->lane; ++k) {
+        unsigned p50 = scale_power(o->p50, -k), p95 = scale_power(o->p95, -k);
+        if (p50 <= 32u && p95 <= 72u) return (uint8_t)(v3->lane - k);
+    }
+    return 0u;
+}
+
+void direct_gain_v3_enable_lanes(direct_gain_v3_t *v3, uint8_t lane_max)
+{
+    if (!v3) return;
+    v3->lane_max = lane_max;
+    v3->lane_cap = lane_max;
+    v3->lane = 0u;
+}
+
+/* Learn the receiver noise from a no-carrier window at maximum gain and
+ * derive the finest useful lane. Lane k scales power by exactly 4^k, so one
+ * measurement on any lane gives the noise on all of them. */
+static void learn_noise(direct_gain_v3_t *v3, const dg3_observation_t *o)
+{
+    if (!v3->lane_max || !v3->lane || o->p50 < 2u) return;
+    uint32_t lane0_q4 = ((uint32_t)(o->p50 - 1u) << 4) >> (2u * v3->lane);
+    if (!lane0_q4) lane0_q4 = 1u;
+    v3->noise_p50_q4 = v3->noise_p50_q4 ?
+        (uint16_t)((7u * v3->noise_p50_q4 + lane0_q4) / 8u) :
+        (uint16_t)lane0_q4;
+    uint8_t cap = v3->lane_max;
+    for (uint8_t k = 0; k <= v3->lane_max; ++k) {
+        if (((uint32_t)v3->noise_p50_q4 << (2u * k)) >=
+            DG3_NOISE_R2_TARGET_Q4) { cap = k; break; }
+    }
+    v3->lane_cap = cap;
+}
+
+static uint8_t start_write(direct_gain_v3_t *v3,
+                           const dg3_observation_t *o,
+                           const dg3_observation_t *prior, uint8_t target)
+{
+    if (target == v3->current_gain) return target;
+    note_direction(v3, target > v3->current_gain ? 1 : -1, o->observed_us);
     int ratio_q10 = 0, uncertainty_pm = 0;
     if (predict(v3, target, &ratio_q10, &uncertainty_pm))
         v3->virtual_gain_q8 -= ratio_db_q8(ratio_q10);
@@ -403,8 +516,55 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
     if (!v3 || !o) return 0u;
     dg3_observation_t prior = v3->last_tracking;
     v3->last_tracking = *o;
+    /* Skip windows that may still hold samples from before a lane switch. */
+    if (v3->lane_us && o->observed_us >= v3->lane_us &&
+        o->observed_us - v3->lane_us < DG3_LANE_GUARD_US)
+        return v3->current_gain;
     bool no_carrier = o->p50 <= 4 && o->origin_pm >= 650 && o->coherence < 20;
     bool saturated = o->clip_pm >= 100 || o->p95 >= 95;
+    bool at_max = v3->current_gain == v3->table.max_index;
+    /* Fold guard. On a finer lane the rail codes are the last warning before
+     * the window folds; a folded strong carrier reads as wide, incoherent
+     * junk (rail codes, large P95) rather than as quiet noise. Either one
+     * returns to the coarse lanes at once; the analog loop then sees the
+     * true level on the next window. */
+    bool junk = o->clip_pm >= 20 || o->p95 > 72 ||
+                (!carrier(o) && !no_carrier && o->p95 >= 53);
+    if (v3->lane && (saturated || junk)) {
+        if (!saturated && ++v3->junk_windows < DG3_JUNK_WINDOWS)
+            return v3->current_gain;
+        ++v3->fold_drops;
+        v3->junk_windows = 0;
+        if (o->observed_us - v3->last_fold_us > DG3_FOLD_STREAK_US)
+            v3->fold_streak = 0;
+        v3->lane_hold_until_us = o->observed_us +
+            ((uint64_t)DG3_LANE_HOLD_US << (v3->fold_streak < 8u ? v3->fold_streak : 8u));
+        if (v3->fold_streak < 255u) ++v3->fold_streak;
+        v3->last_fold_us = o->observed_us;
+        return set_lane(v3, o, 0u);
+    }
+    v3->junk_windows = 0;
+    /* Listening always uses the finest lane (most sensitive carrier
+     * detection, and it measures the noise); with a carrier the lanes stop
+     * at the noise-referenced cap. */
+    bool quiet = v3->lane && at_max && !carrier(o) &&
+                 o->clip_pm == 0u && o->p95 < 40u && o->coherence < 45u;
+    if (quiet) learn_noise(v3, o);
+    uint8_t lane_limit = (no_carrier || quiet) ? v3->lane_max : v3->lane_cap;
+    bool lane_up_ok = at_max && v3->lane < lane_limit &&
+                      o->observed_us >= v3->lane_hold_until_us;
+    /* A carrier found while listening above the cap comes down to it. */
+    if (carrier(o) && v3->lane > v3->lane_cap)
+        return set_lane(v3, o, v3->lane_cap);
+    if (no_carrier && lane_up_ok) {
+        /* Listen on the finest lane: a carrier below one coarse step becomes
+         * visible there. A strong carrier appearing is caught by the fold
+         * guard above. */
+        v3->state = DG3_ACQUIRE;
+        v3->high_windows = v3->weak_windows = 0;
+        v3->last_direction = 0;
+        return set_lane(v3, o, lane_limit);
+    }
     if (no_carrier) {
         /* No usable carrier: listen at the table's maximum gain, not at the
          * survival gain (first index of the highest RF stage, G62). A weak
@@ -420,6 +580,17 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
         v3->virtual_gain_q8 = 0;
         v3->last_direction = 0;
         return start_write(v3, o, &prior, v3->table.max_index);
+    }
+    /* Saturation does not wait for a settling write. A window during settle
+     * may still hold pre-write samples, so this applies after an upward
+     * write (stale data would read lower, not saturated) or once the 300 us
+     * freshness floor has passed; the settling write's learning is dropped. */
+    if (saturated && v3->state == DG3_SETTLE &&
+        (v3->current_gain > v3->prior_gain ||
+         (o->observed_us >= v3->write_us &&
+          o->observed_us - v3->write_us >= 300u))) {
+        v3->before.p50 = 0u;
+        v3->state = DG3_VERIFY;
     }
     if (v3->state == DG3_SETTLE) {
         /* The freshness guard grows from prior settle measurements. The
@@ -470,6 +641,16 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
         v3->virtual_gain_q8 = 0;
         return start_write(v3, o, &prior, emergency_drop(v3));
     }
+    /* Starved at maximum analog gain: the envelope sits in the few cells
+     * around the origin, too small even to prove a carrier. Step to the
+     * finest lane that keeps it in band (no rail codes, so no fold risk). */
+    if (lane_up_ok && v3->state != DG3_SETTLE &&
+        o->p50 < 13 && o->clip_pm < 20 && o->p95 < 53) {
+        uint8_t lane = lane_for(v3, o, true);
+        /* Nothing lands in band with headroom: stay (no forced step). */
+        if (lane == v3->lane) return v3->current_gain;
+        return set_lane(v3, o, lane);
+    }
     if (healthy(o)) {
         v3->state = DG3_HOLD;
         v3->corrections = 0;
@@ -507,6 +688,11 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
     unsigned need_weak = damped ? DG3_DAMPED_WINDOWS : DG3_WEAK_WINDOWS;
     if ((high && v3->high_windows < need_high) ||
         (weak && v3->weak_windows < need_weak)) return v3->current_gain;
+    /* Lanes are the last gain stage in and the first one out, but only in
+     * whole 6 dB steps: when dropping one lane would undershoot the band,
+     * the analog gain trims down instead (continuous total gain). */
+    if (high && v3->lane && scale_power(o->p50, -1) >= 13u)
+        return set_lane(v3, o, lane_for(v3, o, false));
     int target_power = weak ? 17 : 27;
     int error_q8 = power_db_q8((unsigned)target_power) -
                    power_db_q8(o->p50);
@@ -516,6 +702,9 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
                                   -12 * 256, 12 * 256);
     uint8_t target = select_destination(v3, o, weak,
                                         v3->virtual_gain_q8);
+    /* No analog state predicts into the band: a lane step still does. */
+    if (target == v3->current_gain && high && v3->lane)
+        return set_lane(v3, o, (uint8_t)(v3->lane - 1u));
     if (target == v3->current_gain) return target;
     if (v3->state == DG3_VERIFY) ++v3->corrections;
     v3->high_windows = v3->weak_windows = 0;

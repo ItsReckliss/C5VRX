@@ -76,7 +76,9 @@ requirements by themselves**.
 - Do not turn a physical SRAM or DMA block boundary into a DSP reset.
 - Do not claim sample-gapless RF or AV transport without its physical proof.
 - The normal live path recovers the transmitted composite waveform; it does not
-  decode pixels or regenerate PAL/NTSC.
+  decode pixels or regenerate PAL/NTSC. (A sync-flywheel experiment that
+  repairs broken H-sync is parked on branch `feat/sync-flywheel`; see
+  docs/range-max.md for why it is not in main.)
 - Keep USB/debug outside realtime pacing.
 - Do not silently change the tested XIAO D4..D9 DAC pin order or the physical
   8.2k/3.9k/2k/1k/470R/240R plus 200R network.

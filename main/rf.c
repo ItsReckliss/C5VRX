@@ -94,10 +94,23 @@ static const gpio_num_t s_iq_pins[8] = {
     GPIO_NUM_1, GPIO_NUM_0, GPIO_NUM_25, GPIO_NUM_7,   /* Q[9:6] */
     GPIO_NUM_10, GPIO_NUM_5, GPIO_NUM_3, GPIO_NUM_4,   /* I[9:6] */
 };
-static const uint8_t s_iq_diag[8] = {
-    6u, 7u, 8u, 9u,     /* DIAG[6:9]  = Q[9:6] */
-    16u, 17u, 18u, 19u, /* DIAG[16:19] = I[9:6] */
+/* Range lanes: which ADC bits form the signed 4-bit I/Q nibble. Each set
+ * keeps the sign (bit 9) and drops the next MSBs, so inside its window it is
+ * an exact power-of-two scale of the coarse set: same angle, same Phase8
+ * LUT, no calibration. Outside the window it folds (+288 reads as +32), so
+ * Direct Gain only selects a finer set at maximum analog gain and drops back
+ * on rail codes (the pre-fold warning) or non-carrier junk.
+ *   0 coarse    {9,8,7,6}  step 64 codes, window +-512
+ *   1 fine      {9,7,6,5}  step 32, window +-256, +6 dB
+ *   2 ultrafine {9,6,5,4}  step 16, window +-128, +12 dB
+ * DIAG[4,5,14,15] were proven bit-exact against the RF dump (PR #122,
+ * tools/analyze_all_diag.py). */
+static const uint8_t s_iq_lane_sets[RF_IQ_LANE_SETS][8] = {
+    { 6u, 7u, 8u, 9u, 16u, 17u, 18u, 19u },   /* Q[9:6], I[9:6] */
+    { 5u, 6u, 7u, 9u, 15u, 16u, 17u, 19u },
+    { 4u, 5u, 6u, 9u, 14u, 15u, 16u, 19u },
 };
+static volatile uint8_t s_iq_lane_set;
 
 /* Internal vendor symbol -- globally exported by the pinned IDF 6.0.x
  * pp (protocol processing) library for ESP32-C5. */
@@ -149,11 +162,28 @@ static esp_err_t route_modem_iq(void)
     if (err != ESP_OK) return err;
     for (unsigned lane = 0u; lane < 8u; ++lane) {
         esp_rom_gpio_connect_out_signal(s_iq_pins[lane],
-                                        MODEM_DIAG0_IDX + s_iq_diag[lane],
+                                        MODEM_DIAG0_IDX + s_iq_lane_sets[0][lane],
                                         false, false);
     }
     __asm__ __volatile__("fence iorw, iorw" ::: "memory");
     return ESP_OK;
+}
+
+void rf_set_iq_lanes(uint8_t set)
+{
+    if (set >= RF_IQ_LANE_SETS) set = RF_IQ_LANE_SETS - 1u;
+    if (set == s_iq_lane_set) return;
+    for (unsigned lane = 0u; lane < 8u; ++lane)
+        esp_rom_gpio_connect_out_signal(s_iq_pins[lane],
+                                        MODEM_DIAG0_IDX + s_iq_lane_sets[set][lane],
+                                        false, false);
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+    s_iq_lane_set = set;
+}
+
+uint8_t rf_get_iq_lanes(void)
+{
+    return s_iq_lane_set;
 }
 
 static void rf_enable_continuous_modem(void)

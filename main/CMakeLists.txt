@@ -14,6 +14,7 @@ idf_component_register(
         "direct_gain.c"
         "direct_gain_v2.c"
         "direct_gain_v3.c"
+        "analog_video_detect.c"
         "menu_raster.c"
     INCLUDE_DIRS "."
     REQUIRES
@@ -47,6 +48,7 @@ target_bitscrambler_add_src("fm_phase5_fsm_capture.bsasm")
 target_bitscrambler_add_src("fm4.bsasm")
 target_bitscrambler_add_src("bs_addctia_probe.bsasm")
 target_bitscrambler_add_src("fm_phase8_hr_live.bsasm")
+target_bitscrambler_add_src("fm_hc.bsasm")
 if(C5VRX4_EXPERIMENT)
     include("${PROJECT_DIR}/component.cmake")
 endif()

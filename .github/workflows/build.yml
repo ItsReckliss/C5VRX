@@ -161,6 +161,8 @@ jobs:
           /tmp/test_direct_gain_v2
           gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_direct_gain_v3.c main/direct_gain_v3.c main/arc_phy.c -o /tmp/test_direct_gain_v3
           /tmp/test_direct_gain_v3
+          gcc -std=c11 -O2 -Wall -Wextra -Werror -Wno-misleading-indentation -Imain tools/test_analog_video_detect.c main/analog_video_detect.c -lm -o /tmp/test_analog_video_detect
+          /tmp/test_analog_video_detect
           python3 -m pip install --quiet numpy
           python3 tools/analyze_agc_words.py --self-test
           gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_rx_auto_lab.c main/rx_auto_lab.c -o /tmp/test_rx_auto_lab
@@ -175,6 +177,8 @@ jobs:
           gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_phase8_envelope.c main/direct_gain_v3.c main/arc_phy.c -o /tmp/test_phase8_envelope
           /tmp/test_phase8_envelope
           python3 tools/p8env_sweep.py --self-test
+          python3 tools/test_fm_hc.py
+          python3 tools/check_golden_two_slot.py
 
   build:
     name: Build Production Firmware (ESP32-C5)

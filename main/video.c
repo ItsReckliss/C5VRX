@@ -45,7 +45,9 @@
 #include "direct_gain.h"
 #include "direct_gain_v2.h"
 #include "direct_gain_v3.h"
+#include "analog_video_detect.h"
 #include "phase8_gain_lut.h"
+#include "fm_hc_lut.h"
 #include "phase8_envelope.h"
 #include "rx_auto_lab.h"
 #include "trajectory_v2_lut.h"
@@ -148,6 +150,7 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 BITSCRAMBLER_PROGRAM(s_fm_relative_golden_program, "fm_relative_golden");
 BITSCRAMBLER_PROGRAM(s_fm_phase5_360_program, "fm_phase5_360");
 BITSCRAMBLER_PROGRAM(s_fm_phase8_hr_live_program, "fm_phase8_hr_live");
+BITSCRAMBLER_PROGRAM(s_fm_hc_program, "fm_hc");
 BITSCRAMBLER_PROGRAM(s_fm_fsm_capture_program, "fm_phase5_fsm_capture");
 BITSCRAMBLER_PROGRAM(s_fm4_program, "fm4");
 #ifdef C5VRX4_EXPERIMENT
@@ -274,7 +277,7 @@ typedef enum {
     RX_PROFILE_COUNT,
 } rx_profile_t;
 
-static volatile rf_bw_mode_t s_rf_bw_mode = RF_BW_MODE_BW40;
+static volatile rf_bw_mode_t s_rf_bw_mode = RF_BW_MODE_AUTO;
 static volatile bool s_current_bw40 = true;
 static volatile video_output_mode_t s_output_mode = VIDEO_OUTPUT_6BIT_40;
 static video_output_mode_t s_tx_unit_mode = VIDEO_OUTPUT_6BIT_40;
@@ -285,8 +288,16 @@ static direct_gain_v2_t s_direct_gain_v2;
 #if CONFIG_C5VRX_DIRECT_GAIN_V3_EXPERIMENT
 static direct_gain_v3_t s_direct_gain_v3;
 static volatile int s_v3_p50, s_v3_p90, s_v3_p95, s_v3_origin_pm;
+/* Receiver DC at maximum gain (quiet windows), milli-steps of lane 0. */
+static volatile int s_v3_dc_i_mstep, s_v3_dc_q_mstep;
+static volatile uint32_t s_v3_bw_switches;
 static volatile int s_v3_clip_pm, s_v3_coherence;
 static TaskHandle_t s_v3_observer_task_handle;
+#if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
+/* History-conditioned demodulator (fm_hc.bsasm), chosen per boot from NVS
+ * c5vrx/hc_demod = 1 ('P' toggles and reboots). Default Phase8 FULL. */
+static bool s_hc_demod;
+#endif
 static TaskHandle_t s_v3_sentinel_task_handle;
 static esp_timer_handle_t s_v3_sentinel_timer;
 static volatile uint32_t s_v3_fast_overload_state;
@@ -1222,7 +1233,7 @@ static const char *demod_mode_name(void)
     return "C5V4 SPAN75";
 #endif
 #if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
-    return "PHASE8 HR TEST";
+    return s_hc_demod ? "HC TEST" : "PHASE8 HR TEST";
 #endif
     return "GOLDEN";
 }
@@ -1533,6 +1544,12 @@ static void direct_gain_v3_apply_target(uint8_t target, uint32_t profile)
     s_last_direct_gain_delta = (int)target - (int)s_current_gain;
     s_last_direct_gain_total_writes = s_direct_gain_v3.writes;
     s_last_direct_gain_hold_cycles = s_direct_gain_v3.holds;
+    if (s_direct_gain_v3.lane != rf_get_iq_lanes()) {
+        /* Range lane switch: bump the epoch so no in-flight measurement
+         * mixes samples from both lane sets. */
+        rf_set_iq_lanes(s_direct_gain_v3.lane);
+        ++s_gain_transition_count;
+    }
     if (target != s_current_gain) {
         ++s_direct_gain_v2_write_seq;
         __sync_synchronize();
@@ -1604,6 +1621,65 @@ static void direct_gain_v3_sentinel_task(void *arg)
     }
 }
 
+/* Receiver DC at maximum gain, from quiet (no-carrier) windows: mean signed
+ * nibble relative to the bucket centre, rescaled to lane-0 milli-steps. At
+ * ~0.6 step of noise a DC of a few tenths of a step biases the quantizer
+ * cells; this measures whether that matters before any LUT compensation. */
+static void direct_gain_v5_dc_observe(const uint8_t *sample, size_t bytes,
+                                      const dg3_observation_t *o)
+{
+    const direct_gain_v3_t *v3 = &s_direct_gain_v3;
+    if (v3->current_gain != v3->table.max_index || !v3->lane ||
+        o->clip_pm || o->coherence >= 45u || o->p95 >= 40u || !bytes) return;
+    int32_t si = 0, sq = 0;
+    for (size_t n = 0; n < bytes; ++n) {
+        si += 2 * ((int8_t)(sample[n] & 0xF0u) >> 4) + 1;
+        sq += 2 * ((int8_t)(uint8_t)(sample[n] << 4) >> 4) + 1;
+    }
+    /* mean(2x+1)/2 steps -> milli-steps of this lane -> lane-0 units. */
+    int di = (int)(si * 500 / (int32_t)bytes) >> v3->lane;
+    int dq = (int)(sq * 500 / (int32_t)bytes) >> v3->lane;
+    s_v3_dc_i_mstep = (7 * s_v3_dc_i_mstep + di) / 8;
+    s_v3_dc_q_mstep = (7 * s_v3_dc_q_mstep + dq) / 8;
+}
+
+/* V5 bandwidth gear (RF BW mode AUTO). BW20 halves the noise bandwidth (~3 dB
+ * CNR) but trims wideband-FM detail/chroma, so it is the last gear: only at
+ * maximum analog gain, on the noise-referenced lane cap, with a present but
+ * starved or incoherent carrier for 1 s. It returns to BW40 after 1 s of
+ * clear recovery. Each switch is a rare PHY write; the gain epoch is bumped
+ * so no measurement straddles it. */
+#define V5_BW_DWELL_US 1000000u
+static void direct_gain_v5_bw_gear(const dg3_observation_t *o)
+{
+    static uint64_t weak_since, strong_since;
+    const direct_gain_v3_t *v3 = &s_direct_gain_v3;
+    if (s_rf_bw_mode != RF_BW_MODE_AUTO) { weak_since = strong_since = 0; return; }
+    uint64_t now = o->observed_us;
+    bool at_max = v3->current_gain == v3->table.max_index;
+    bool present = o->origin_pm < 650u && o->coherence >= 30u;
+    bool edge = at_max && v3->lane >= v3->lane_cap && present &&
+                (o->p50 < 13u || o->coherence < 70u);
+    bool clear = (!at_max || v3->lane == 0u) && o->p50 >= 13u &&
+                 o->coherence >= 85u;
+    if (s_current_bw40) {
+        strong_since = 0;
+        if (!edge) { weak_since = 0; return; }
+        if (!weak_since) weak_since = now;
+        if (now - weak_since < V5_BW_DWELL_US) return;
+        apply_rf_bandwidth(false);
+    } else {
+        weak_since = 0;
+        if (!clear) { strong_since = 0; return; }
+        if (!strong_since) strong_since = now;
+        if (now - strong_since < V5_BW_DWELL_US) return;
+        apply_rf_bandwidth(true);
+    }
+    weak_since = strong_since = 0;
+    ++s_v3_bw_switches;
+    ++s_gain_transition_count;
+}
+
 /* Observe four separated 64-byte regions in the latest completed descriptor.
  * This task never touches a descriptor still owned by the RX DMA engine and
  * never participates in the 40 MS/s video clock. Only this task writes gain. */
@@ -1623,6 +1699,11 @@ static void direct_gain_v3_observer_task(void *arg)
         if (!active) {
             was_active = false;
             (void)__sync_lock_test_and_set(&s_v3_fast_overload_state, 0u);
+            /* Finer range lanes are owned by Direct Gain only. */
+            if (rf_get_iq_lanes()) {
+                rf_set_iq_lanes(0u);
+                ++s_gain_transition_count;
+            }
             continue;
         }
         uint32_t profile = s_profile_generation;
@@ -1631,6 +1712,12 @@ static void direct_gain_v3_observer_task(void *arg)
             s_direct_gain_v3.current_gain != s_current_gain) {
             direct_gain_v3_reset(&s_direct_gain_v3, rf_get_arc_gain_table(),
                                  s_current_gain, rf_get_arc_survival_gain());
+            direct_gain_v3_enable_lanes(&s_direct_gain_v3,
+                                        (uint8_t)(RF_IQ_LANE_SETS - 1u));
+            if (rf_get_iq_lanes()) {
+                rf_set_iq_lanes(0u);
+                ++s_gain_transition_count;
+            }
             seen_profile = profile;
             seen_arc = arc;
             was_active = true;
@@ -1665,6 +1752,8 @@ static void direct_gain_v3_observer_task(void *arg)
         s_v3_coherence = observation.coherence;
         uint8_t target = direct_gain_v3_tick(&s_direct_gain_v3, &observation);
         direct_gain_v3_apply_target(target, profile);
+        direct_gain_v5_dc_observe(sample, sizeof(sample), &observation);
+        direct_gain_v5_bw_gear(&observation);
     }
 }
 #endif
@@ -1673,7 +1762,8 @@ static int signal_strength_score(const control_metrics_t *m, uint8_t gain)
 {
     if (m->q_phase < 18 || m->origin_permille > 850) return 0;
     int coherence = (m->q_phase - 18) * 100 / 62;
-    int power = (m->p_median - 6) * 100 / 28;
+    /* A finer range lane shows the envelope 2^k larger: undo it (power). */
+    int power = ((m->p_median >> (2u * rf_get_iq_lanes())) - 6) * 100 / 28;
     int max_gain = profile_gain_max();
     int gain_headroom = (max_gain - (int)gain) * 100 /
                         (max_gain > 2 ? max_gain - 2 : 1);
@@ -1725,7 +1815,7 @@ static void settings_load(void)
         (!legacy_v3 && settings.version != SETTINGS_VERSION)) {
         s_rx_profile = RX_PROFILE_DIRECT_GAIN; /* legacy: s_rx_profile = RX_PROFILE_ARC */
         s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;
-        s_rf_bw_mode = RF_BW_MODE_BW40;
+        s_rf_bw_mode = RF_BW_MODE_AUTO; /* V5 gear: starts BW40 */
         s_afc_mode = AFC_MODE_OFF;
         s_agc_mode = ANALOG_AGC_ACTIVE;
         s_current_gain = rf_get_arc_survival_gain();
@@ -1748,7 +1838,7 @@ static void settings_load(void)
                    RX_PROFILE_DIRECT_GAIN_V1 :
                    settings.rx_profile == RX_PROFILE_ARC_V3_EXP ?
                    RX_PROFILE_ARC_V3_EXP : RX_PROFILE_DIRECT_GAIN;
-    s_rf_bw_mode = RF_BW_MODE_BW40;
+    s_rf_bw_mode = RF_BW_MODE_AUTO; /* V5 gear: starts BW40 */
     s_afc_mode = AFC_MODE_OFF;
     apply_rf_bandwidth(true);
     if (s_video_std_mode == VIDEO_STD_MODE_PAL) s_video_std = VIDEO_STD_PAL;
@@ -1981,11 +2071,21 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            transport_age_ms, (unsigned long)s_last_transport_flags);
 #if CONFIG_C5VRX_DIRECT_GAIN_V3_EXPERIMENT
     printf("DG3_OBS p50=%d p90=%d p95=%d origin_pm=%d clip_pm=%d coherence=%d "
-           "state=%u gain=%u virtual_q8=%ld writes=%lu holds=%lu verified=%lu learned=%lu "
+           "state=%u gain=%u lane=%u lane_cap=%u noise_r2_q4=%u "
+           "dc_i_mstep=%d dc_q_mstep=%d bw40=%u bw_switches=%lu "
+           "lane_changes=%lu fold_drops=%lu "
+           "virtual_q8=%ld writes=%lu holds=%lu verified=%lu learned=%lu "
            "settle_fine_us=%u settle_bb_us=%u settle_rf_us=%u\n",
            s_v3_p50, s_v3_p90, s_v3_p95, s_v3_origin_pm, s_v3_clip_pm,
            s_v3_coherence,
            (unsigned)s_direct_gain_v3.state, s_current_gain,
+           (unsigned)rf_get_iq_lanes(),
+           (unsigned)s_direct_gain_v3.lane_cap,
+           (unsigned)s_direct_gain_v3.noise_p50_q4,
+           s_v3_dc_i_mstep, s_v3_dc_q_mstep,
+           s_current_bw40 ? 1u : 0u, (unsigned long)s_v3_bw_switches,
+           (unsigned long)s_direct_gain_v3.lane_changes,
+           (unsigned long)s_direct_gain_v3.fold_drops,
            (long)s_direct_gain_v3.virtual_gain_q8,
            (unsigned long)s_direct_gain_v3.writes,
            (unsigned long)s_direct_gain_v3.holds,
@@ -3865,6 +3965,7 @@ static void start_flight_demodulator(void)
     ESP_ERROR_CHECK(s_output_mode == VIDEO_OUTPUT_6BIT_40 ?
                     ESP_OK : ESP_ERR_INVALID_STATE);
     ESP_ERROR_CHECK(bitscrambler_load_program(s_flight_bs,
+                                             s_hc_demod ? s_fm_hc_program :
                                              s_fm_phase8_hr_live_program));
 #else
     if (s_output_mode == VIDEO_OUTPUT_4BIT_80) {
@@ -4153,6 +4254,52 @@ static void init_boot_button(void)
     gpio_config(&cfg);
 }
 
+/* Copy the endpoint bytes (odd ring byte of each pair, as Phase8 reads
+ * them) of the most recent `n` RX-completed pairs, unwrapping the ring. */
+static bool copy_recent_endpoints(uint8_t *dst, size_t n)
+{
+    if (s_rx_dma_ch < 0 || s_rx_dma_ch >= 3 || s_rx_dscr_count < 2 ||
+        2u * n > sizeof(s_raw_ring) / 2u) return false;
+    int idx = find_dscr_index(s_rx_dscr_nodes, s_rx_dscr_count,
+                              AHB_DMA.channel[s_rx_dma_ch].in.in_dscr_bf0.val);
+    if (idx < 0) return false;
+    uint8_t *buf = s_rx_dscr_nodes[idx].buffer;
+    if (buf < s_raw_ring || buf >= s_raw_ring + sizeof(s_raw_ring)) return false;
+    size_t end = (size_t)(buf - s_raw_ring) & ~(size_t)1u;
+    size_t pos = (end + sizeof(s_raw_ring) - 2u * n) % sizeof(s_raw_ring);
+    sync_dma_m2c(s_raw_ring, sizeof(s_raw_ring));
+    for (size_t k = 0; k < n; ++k) {
+        dst[k] = s_raw_ring[pos + 1u];
+        pos = (pos + 2u) % sizeof(s_raw_ring);
+    }
+    return true;
+}
+
+/* Issue #128: median analog-video confidence of three windows of ~4096
+ * endpoints on the current channel (analog_video_detect.c). The window is
+ * heap-allocated only for the duration of a scan: static buffers took the
+ * internal heap the standalone menu needs (ESP_ERR_NO_MEM). */
+#define SCAN_VIDEO_PAIRS 4092u
+static uint8_t *s_scan_video_buf;
+
+static analog_video_t scan_video_confidence(void)
+{
+    analog_video_t v[3] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    if (!s_scan_video_buf) return v[0];
+    for (unsigned w = 0; w < 3u; ++w) {
+        if (w) vTaskDelay(pdMS_TO_TICKS(10));
+        if (copy_recent_endpoints(s_scan_video_buf, SCAN_VIDEO_PAIRS))
+            v[w] = analog_video_detect(s_scan_video_buf, SCAN_VIDEO_PAIRS,
+                                       c5vrx_phase8_gain_lut);
+    }
+    /* median by confidence */
+    analog_video_t a = v[0], b = v[1], c = v[2], t;
+    if (a.confidence > b.confidence) { t = a; a = b; b = t; }
+    if (b.confidence > c.confidence) { t = b; b = c; c = t; }
+    if (a.confidence > b.confidence) { t = a; a = b; b = t; }
+    return b;
+}
+
 static void channel_auto_search(void)
 {
     const size_t original_channel = rf_get_channel_index();
@@ -4161,11 +4308,22 @@ static void channel_auto_search(void)
     size_t best_channel = original_channel;
     int best_rank = -1;
     int best_quality = 0;
+    int best_video = -1;
+    int best_offset = 0x7fffffff;
+    const uint8_t max_gain = rf_get_arc_gain_table()->max_index;
 
     s_channel_scan_active = true;
     s_channel_scan_progress = 0;
     rf_set_rx_gain(true, 52u); /* Compare every channel at the same RF gain. */
+    s_scan_video_buf = heap_caps_malloc(SCAN_VIDEO_PAIRS, MALLOC_CAP_INTERNAL);
+    if (!s_scan_video_buf)
+        printf("[AUTO SEARCH] no memory for the video check; channel kept\n");
 
+    /* Issue #128: RF strength alone let 5 GHz Wi-Fi win (and pull the scan
+     * into the L band). A channel only qualifies with analog-video
+     * confidence (line-period periodicity); RF quality only breaks ties. A
+     * channel starved at gain 52 (far VTX) is re-measured at maximum gain so
+     * a weak but real VTX is not missed. */
     for (size_t channel = 0; channel < channel_count; ++channel) {
         if (rf_set_channel(channel) != ESP_OK) continue;
         vTaskDelay(pdMS_TO_TICKS(90));
@@ -4186,17 +4344,80 @@ static void channel_auto_search(void)
             metrics.strong_winding_permille, metrics.iq_skew_permille,
             metrics.iq_cross_permille, 0, active_demod_shadow(metrics.fusion_shadow));
         int rank = scan_fusion.quality + quality * 2;
-        if (scan_fusion.context != FUSION_CONTEXT_NO_CARRIER &&
-            metrics.q_phase >= 22 && rank > best_rank) {
-            best_rank = rank;
-            best_channel = channel;
-            best_quality = quality;
+        analog_video_t video = scan_video_confidence();
+        if (video.confidence < ANALOG_VIDEO_MIN_CONFIDENCE &&
+            metrics.origin_permille > 500) {
+            rf_set_rx_gain(true, max_gain);
+            vTaskDelay(pdMS_TO_TICKS(20));
+            analog_video_t far = scan_video_confidence();
+            rf_set_rx_gain(true, 52u);
+            if (far.confidence > video.confidence) video = far;
+        }
+        if (video.confidence >= ANALOG_VIDEO_MIN_CONFIDENCE) {
+            int off = video.offset_khz < 0 ? -video.offset_khz : video.offset_khz;
+            printf("[AUTO SEARCH] candidate %s (%u MHz): video=%d offset=%d kHz lag=%d %s rf=%d\n",
+                   rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz,
+                   video.confidence, video.offset_khz, video.lag,
+                   video.standard == 1 ? "PAL" : "NTSC", rank);
+            /* The BW40 filter lets a VTX through on neighbouring channels
+             * too (hardware: A1's VTX gave valid video on B8/F7/F8/R7), and
+             * the confidence ignores offset by design. Only a carrier
+             * centred within 3 MHz qualifies. That alone is not enough: the
+             * 50 ns offset measurement wraps every 20 MHz, so a channel
+             * exactly 20 MHz away also reads "centred" (hardware: A2, E5,
+             * F6 around an A1 VTX; one scan picked A2). There the VTX sits
+             * on the filter edge and is weak, so among centred candidates
+             * the strongest RF wins (A1 rf=168 vs 0), then the better
+             * centred one in 500 kHz steps (B8 at 5866 MHz reads the same
+             * RF as A1 but -1040 vs -14 kHz), then confidence. */
+            bool centred = off <= 3000;
+            bool best_centred = best_offset <= 3000;
+            int off_bucket = off / 500, best_bucket = best_offset / 500;
+            if ((centred && !best_centred) ||
+                (centred == best_centred &&
+                 (rank > best_rank ||
+                  (rank == best_rank &&
+                   (off_bucket < best_bucket ||
+                    (off_bucket == best_bucket &&
+                     video.confidence > best_video)))))) {
+                best_offset = off;
+                best_video = video.confidence;
+                best_rank = rank;
+                best_channel = channel;
+                best_quality = quality;
+            }
         }
         s_channel_scan_progress = (unsigned)((channel + 1u) * 100u / channel_count);
         menu_render_menu();
     }
 
-    if (best_rank < 0) best_channel = original_channel;
+    /* Confirm the winner before committing; otherwise keep the channel. */
+    if (best_video >= 0) {
+        (void)rf_set_channel(best_channel);
+        vTaskDelay(pdMS_TO_TICKS(90));
+        analog_video_t confirm = scan_video_confidence();
+        if (confirm.confidence < ANALOG_VIDEO_MIN_CONFIDENCE) {
+            rf_set_rx_gain(true, max_gain);
+            vTaskDelay(pdMS_TO_TICKS(20));
+            analog_video_t far = scan_video_confidence();
+            if (far.confidence > confirm.confidence) confirm = far;
+        }
+        /* The winner must also have its carrier centred (a neighbouring
+         * channel sees the VTX aliased several MHz off). */
+        int coff = confirm.offset_khz < 0 ? -confirm.offset_khz : confirm.offset_khz;
+        if (confirm.confidence < ANALOG_VIDEO_MIN_CONFIDENCE || coff > 3000) {
+            printf("[AUTO SEARCH] %s failed confirmation (video=%d offset=%d kHz)\n",
+                   rf_get_current_channel()->name, confirm.confidence,
+                   confirm.offset_khz);
+            best_video = -1;
+        }
+    }
+    if (best_video < 0) {
+        best_channel = original_channel;
+        best_rank = -1;
+    }
+    heap_caps_free(s_scan_video_buf);
+    s_scan_video_buf = NULL;
     (void)rf_set_channel(best_channel);
     rf_set_rx_gain(true, original_gain);
     ++s_profile_generation;
@@ -4209,7 +4430,7 @@ static void channel_auto_search(void)
     settings_save();
     menu_render_menu();
     printf("[AUTO SEARCH] %s -> %s (%u MHz), signal=%d\n",
-           best_rank < 0 ? "No carrier; restored" : "Selected",
+           best_rank < 0 ? "No analog video found; restored" : "Selected",
            rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz,
            s_signal_strength);
 }
@@ -4989,8 +5210,10 @@ profile_post_gain:
         /* Experimental automatic RF bandwidth gearbox.
          * BW40 -> BW20 only after 200 ms of deep fade at high gain.
          * BW20 -> BW40 requires 1 s of strong coherent recovery. */
-        if (s_rf_bw_mode == RF_BW_MODE_AUTO) {
-            /* TRACK is a hard no-write zone. Filter switching is allowed only
+        if (s_rf_bw_mode == RF_BW_MODE_AUTO &&
+            s_rx_profile != RX_PROFILE_DIRECT_GAIN) {
+            /* Direct Gain owns its own gear (direct_gain_v5_bw_gear).
+             * TRACK is a hard no-write zone. Filter switching is allowed only
              * while acquiring/relearning a carrier; once locked, preserve the
              * exact RF/PHY state so a bandwidth write cannot corrupt CVBS sync. */
             if (s_agc_state == AGC_STATE_TRACK) {
@@ -5180,6 +5403,24 @@ static void console_diag_task(void *arg)
                     lab_request_fresh_phy_calibration();
                 } else if (c == 'R') {
                     lab_run_rssi_gain_probe();
+#if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
+                } else if (c == 'P') {
+                    nvs_handle_t h;
+                    esp_err_t err = nvs_open("c5vrx", NVS_READWRITE, &h);
+                    if (err == ESP_OK) {
+                        err = nvs_set_u8(h, "hc_demod", s_hc_demod ? 0u : 1u);
+                        if (err == ESP_OK) err = nvs_commit(h);
+                        nvs_close(h);
+                    }
+                    printf("[DEMOD] -> %s on reboot err=%s\n",
+                           s_hc_demod ? "PHASE8 FULL" : "HC (history-conditioned)",
+                           esp_err_to_name(err));
+                    if (err == ESP_OK) {
+                        fflush(stdout);
+                        vTaskDelay(pdMS_TO_TICKS(150));
+                        esp_restart();
+                    }
+#endif
                 } else if (c == 'D') {
                     apply_rx_profile(RX_PROFILE_DIRECT_GAIN);
                     settings_save();
@@ -5553,6 +5794,19 @@ esp_err_t video_start(void)
     if ((err = prepare_rx()) != ESP_OK) return err;
     if ((err = prepare_tx()) != ESP_OK) return err;
 
+#if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
+    {
+        nvs_handle_t h;
+        uint8_t hc = 0;
+        if (nvs_open("c5vrx", NVS_READONLY, &h) == ESP_OK) {
+            (void)nvs_get_u8(h, "hc_demod", &hc);
+            nvs_close(h);
+        }
+        s_hc_demod = hc == 1u;
+        ESP_LOGW(TAG, "Live demodulator: %s ('P' toggles, reboot)",
+                 s_hc_demod ? "HC (history-conditioned, fm_hc)" : "PHASE8 FULL");
+    }
+#endif
     start_flight_demodulator();
 
     /* Start RX cyclic ring. GDMA begins writing at s_raw_ring[0]. */
