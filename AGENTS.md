@@ -66,6 +66,10 @@ requirements by themselves**.
   the default again without a new hardware comparison that beats V4.
 
 - VTX presence and USB must never gate or pace IQ production.
+- Native ESP32-C5 hardware AGC is opt-in (NVS `c5vrx/native_agc = 1`, set by
+  `N` or the RF page profile cycle). In that mode never call
+  `phy_disable_agc()` / `phy_rfagc_disable()` and never force RX gain; every
+  firmware gain write must stay refused at `rf_set_rx_gain()`.
 - The normal live source is MODEM_DIAG Q4/I4 captured by PARLIO RX; active
   MAC-owned dump SRAM is a diagnostic writer, not a readable live source.
 - Do not turn a physical SRAM or DMA block boundary into a DSP reset.

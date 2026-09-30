@@ -14,6 +14,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 #include "driver/gpio.h"
 #include "esp_err.h"
@@ -39,9 +40,10 @@
 /* Runtime analog filter state; startup remains BW40. */
 static bool s_analog_bw40 = true;
 
-/* Issue #117/#119 native hardware AGC experiment. Decided once per boot from
- * NVS before PHY init: the vendor AGC cannot be restored after
- * phy_disable_agc()/phy_rfagc_disable(), so it is never disabled instead. */
+/* Native hardware AGC: opt-in (Direct Gain V4 is the default gain owner).
+ * Decided once per boot from NVS before PHY init: the vendor AGC cannot be
+ * restored after phy_disable_agc()/phy_rfagc_disable(), so it is never
+ * disabled instead. Only an explicit NVS value of 1 selects native AGC. */
 #define NATIVE_AGC_NVS_NAMESPACE "c5vrx"
 #define NATIVE_AGC_NVS_KEY       "native_agc"
 #define RX_AGC_CTRL_REG          0x600A7030u
@@ -335,9 +337,7 @@ esp_err_t rf_request_native_agc_boot(bool enable)
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NATIVE_AGC_NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) return err;
-    err = enable ? nvs_set_u8(handle, NATIVE_AGC_NVS_KEY, 1u)
-                 : nvs_erase_key(handle, NATIVE_AGC_NVS_KEY);
-    if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    err = nvs_set_u8(handle, NATIVE_AGC_NVS_KEY, enable ? 1u : 0u);
     if (err == ESP_OK) err = nvs_commit(handle);
     nvs_close(handle);
     return err;
@@ -355,6 +355,18 @@ void rf_get_native_agc_state(rf_native_agc_state_t *state)
     state->gain_status_reg = REG32(RX_GAIN_STATUS_REG);
     state->agc_ctrl_reg = REG32(RX_AGC_CTRL_REG);
     state->blocked_writes = s_native_agc_blocked_writes;
+}
+
+/* Read-only dump of the AGC register block programmed by the vendor AGC init,
+ * update and saturation-gain routines. Evidence for #117 Phase 4 tuning. */
+void rf_dump_agc_regs(void)
+{
+    printf("AGCREGS native=%u", s_native_agc ? 1u : 0u);
+    for (uint32_t addr = 0x600A7000u; addr < 0x600A7200u; addr += 4u) {
+        if ((addr & 0x1Fu) == 0u) printf("\nAGCREGS 0x%08lx:", (unsigned long)addr);
+        printf(" %08lx", (unsigned long)REG32(addr));
+    }
+    printf("\n");
 }
 
 esp_err_t rf_start(void)

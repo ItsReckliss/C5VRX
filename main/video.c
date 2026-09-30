@@ -2045,6 +2045,27 @@ static void p8env_capture_report(void)
            (unsigned long)t.bs_eof_overload_count);
 }
 
+/* Read-only raw Q4/I4 dump ('Q'): one completed-descriptor probe, i.e. four
+ * separated runs of 64 consecutive 25 ns samples, printed as hex. */
+static void lab_dump_raw_probe(void)
+{
+    static uint8_t sample[RX_PROBE_REGIONS * RX_PROBE_REGION_BYTES];
+    for (unsigned attempt = 0; attempt < 16u; ++attempt) {
+        if (!rx_probe_copy_completed(sample)) {
+            vTaskDelay(1);
+            continue;
+        }
+        for (unsigned r = 0; r < RX_PROBE_REGIONS; ++r) {
+            printf("Q4RAW r=%u ", r);
+            for (unsigned n = 0; n < RX_PROBE_REGION_BYTES; ++n)
+                printf("%02x", sample[r * RX_PROBE_REGION_BYTES + n]);
+            printf("\n");
+        }
+        return;
+    }
+    printf("Q4RAW unavailable\n");
+}
+
 static void lab_apply_fixed_gain(uint8_t gain)
 {
     if (gain < LAB_GAIN_MIN) gain = LAB_GAIN_MIN;
@@ -2607,9 +2628,10 @@ static void lab_request_fresh_phy_calibration(void)
     esp_restart();
 }
 
-/* Issue #117/#119: native hardware AGC is a per-boot experiment because the
- * vendor loop cannot be restored after C5VRX disables it. 'N' flips the NVS
- * request and reboots; the next rf_start() decides ownership before PHY use. */
+/* Native hardware AGC is an opt-in per-boot choice (Direct Gain V4 is the
+ * default) because the vendor loop cannot be restored after C5VRX disables
+ * it. 'N' and the RF page profile cycle flip it and reboot; rf_start()
+ * decides ownership before PHY use. */
 static void lab_toggle_native_agc_boot(void)
 {
     if (s_gain_sweep.active || s_menu_active || s_pre_q4_probe_active) {
@@ -3624,12 +3646,6 @@ static const char *agc_state_name(void)
            s_agc_state == AGC_STATE_LEARN ? "LEARN" : "SEARCH";
 }
 
-static const char *agc_mode_name(void)
-{
-    return s_agc_mode == ANALOG_AGC_ACTIVE ? "AUTO" :
-           s_agc_mode == ANALOG_AGC_SHADOW ? "SHADOW" : "MANUAL";
-}
-
 static const char *afc_mode_name(void)
 {
     return s_afc_mode == AFC_MODE_AUTO ? "AUTO" :
@@ -3731,7 +3747,8 @@ static void menu_draw_rf_page(void)
                          s_rx_profile == RX_PROFILE_DIRECT_GAIN ? "DEFAULT" : "A/B");
     menu_ui_value_box(100, 22, 276, "RX PROFILE", rx_profile_name());
     menu_ui_value_box(100, 34, 130, "BANDWIDTH", rf_bw_mode_name());
-    menu_ui_value_box(238, 34, 138, "AGC", agc_mode_name());
+    snprintf(buf, sizeof(buf), "S%u", (unsigned)s_signal_strength);
+    menu_ui_value_box(238, 34, 138, "SIGNAL", buf);
 
     if (s_noise_floor_valid) {
         snprintf(buf, sizeof(buf), "Q%d NF%d", s_last_q_phase, s_last_noise_floor_dbm);
@@ -3739,7 +3756,7 @@ static void menu_draw_rf_page(void)
         snprintf(buf, sizeof(buf), "P%d Q%d%%", s_last_p_median, s_last_q_phase);
     }
     menu_ui_text(buf, 100, 47, UI_MUTED);
-    menu_ui_text_right("LONG:BW  2S:PROFILE", 376, 47, UI_WHITE);
+    menu_ui_text_right("LONG: BANDWIDTH", 376, 47, UI_WHITE);
 }
 
 static void menu_draw_afc_page(void)
@@ -4245,7 +4262,7 @@ static void handle_button_long_click(void)
             printf("[MENU: CHANNEL] Switched to %s (%u MHz)\n",
                    rf_get_current_channel()->name, rf_get_current_channel()->freq_mhz);
             break;
-        case 2: /* RF BANDWIDTH (2s hold cycles whole RX profile) */
+        case 2: /* RF BANDWIDTH; gain is always native AGC from the menu */
             cycle_rf_bandwidth_mode();
             settings_save();
             printf("[MENU: RF BW] Mode -> %s (active %s)\n",
@@ -4312,7 +4329,6 @@ static void analog_agc_task(void *arg)
     int btn_ticks = 0;
     bool btn_long_fired = false;
     bool btn_scan_fired = false;
-    bool btn_profile_fired = false;
     bool btn_recovery_fired = false;
     bool was_locked = false;
     range_control_t range_controller;
@@ -4366,7 +4382,6 @@ static void analog_agc_task(void *arg)
             btn_ticks = 0;
             btn_long_fired = false;
             btn_scan_fired = false;
-            btn_profile_fired = false;
             btn_recovery_fired = false;
         } else {
             int btn_level = gpio_get_level(BOOT_BTN_GPIO);
@@ -4382,18 +4397,7 @@ static void analog_agc_task(void *arg)
                     open_recovery_menu();
                 }
 
-                /* RF page gets two independent controls without adding menu
-                 * geometry: 0.6-2.0 s changes BW on release; >=2.0 s changes
-                 * the complete RX profile once. */
-                if (s_menu_active && s_menu_cursor == 2) {
-                    if (btn_ticks >= 40 && !btn_profile_fired) {
-                        btn_profile_fired = true;
-                        btn_long_fired = true;
-                        cycle_rx_profile();
-                        menu_render_menu();
-                        s_menu_timeout_ticks = 0;
-                    }
-                } else if (btn_ticks >= 12 && !btn_long_fired) {
+                if (btn_ticks >= 12 && !btn_long_fired) {
                     btn_long_fired = true;
                     handle_button_long_click();
                 }
@@ -4404,19 +4408,12 @@ static void analog_agc_task(void *arg)
                     s_menu_timeout_ticks = 0;
                 }
             } else if (btn_ticks > 0) {
-                if (s_menu_active && s_menu_cursor == 2) {
-                    if (!btn_profile_fired && btn_ticks >= 12) {
-                        handle_button_long_click(); /* normal RF bandwidth action */
-                    } else if (!btn_profile_fired && btn_ticks >= 2) {
-                        handle_button_short_click();
-                    }
-                } else if (!btn_long_fired && btn_ticks >= 2) {
+                if (!btn_long_fired && btn_ticks >= 2) {
                     handle_button_short_click();
                 }
                 btn_ticks = 0;
                 btn_long_fired = false;
                 btn_scan_fired = false;
-                btn_profile_fired = false;
                 btn_recovery_fired = false;
             }
         }
@@ -5121,6 +5118,10 @@ static void console_diag_task(void *arg)
                     p8env_capture_report();
                 } else if (c == 'N') {
                     lab_toggle_native_agc_boot();
+                } else if (c == 'T') {
+                    rf_dump_agc_regs();
+                } else if (c == 'Q') {
+                    lab_dump_raw_probe();
                 } else if (c == 'g') {
                     lab_start_gain_sweep();
                 } else if (c == 'F') {
@@ -5498,9 +5499,9 @@ esp_err_t video_start(void)
     if (rf_native_agc_active()) {
         rf_native_agc_state_t native;
         rf_get_native_agc_state(&native);
-        ESP_LOGW(TAG, "NATIVE HW AGC EXPERIMENT: vendor AGC never disabled, "
+        ESP_LOGW(TAG, "NATIVE HW AGC (opt-in): vendor AGC never disabled, "
                  "firmware gain writes blocked (gain_reg=0x%08lx agc_reg=0x%08lx). "
-                 "'E' = P8ENV row, 'N' = reboot to firmware gain control",
+                 "'E' = P8ENV row, 'N' = reboot to Direct Gain V4",
                  (unsigned long)native.gain_status_reg,
                  (unsigned long)native.agc_ctrl_reg);
     }

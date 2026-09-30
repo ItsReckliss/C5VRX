@@ -389,10 +389,11 @@ check("stored legacy gain profiles migrate to default V2",
       "settings.rx_profile == RX_PROFILE_ARC_V3_EXP" in all_c and
       "RX_PROFILE_ARC_V3_EXP : RX_PROFILE_DIRECT_GAIN" in all_c)
 
-check("RF menu preserves BW control and adds two-second profile selector",
-      "LONG:BW  2S:PROFILE" in all_c and
-      "btn_ticks >= 40" in all_c and
-      "cycle_rx_profile();" in all_c)
+check("RF menu offers only native AGC plus BW control; no on-screen profile selector",
+      '"NATIVE HW AGC"' in all_c and
+      '"LONG: BANDWIDTH"' in all_c and
+      "2S:PROFILE" not in all_c and
+      "btn_profile_fired" not in all_c)
 check("VIDEO menu has only the Golden live demodulator",
       "LONG:DAC - APPLIES ON EXIT" in all_c and
       "cycle_demod_mode();" not in all_c and
@@ -712,6 +713,10 @@ check("Native HW AGC experiment never disables vendor AGC and blocks firmware ga
                 r"if \(s_native_agc\) \{\s*\+\+s_native_agc_blocked_writes;\s*return;", rf_c) and
       "if (rf_native_agc_active()) return s_current_gain;" in video_c and
       "} else if (c == 'N') {" in video_c)
+check("Direct Gain V4 is the default boot gain owner; native AGC needs explicit NVS 1",
+      re.search(r"static bool native_agc_boot_requested\(void\)\s*\{\s*nvs_handle_t handle;\s*"
+                r"uint8_t value = 0;", rf_c) and
+      "return value == 1u;" in rf_c)
 check("RSSI probe owns every AGC/BW/AFC write during its measurement",
       "s_rssi_probe_active = true;" in video_c and
       "if (s_rssi_probe_active) continue;" in video_c and

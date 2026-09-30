@@ -219,6 +219,7 @@ Connecting to the USB serial console (115200 baud) provides live telemetry and s
 | `D` / `I` / `Y` | Select Direct Gain V4 / Direct Gain V1 / ARC V3 profiles |
 | `N` | Toggle native hardware AGC (opt-in) / Direct Gain V4 and reboot |
 | `E` | Print one P8ENV row (Q4 envelope, native AGC state, transport) |
+| `Q` / `T` | Raw Q4/I4 dump (4 x 64 consecutive samples) / read-only AGC register dump |
 
 ---
 
