@@ -158,6 +158,7 @@ The continuous pixel path runs in AHB GDMA, BitScrambler, and PARLIO TX. A backg
 
 ### 2. Direct Gain V5 default gain controller
 - V5 = V4 plus a 200 us observer cadence (timer-driven, each completed RX descriptor measured at most once) and anti-hunt damping: two direction reversals of consecutive writes within 20 ms make out-of-band decisions need 8 windows (~1.6 ms) for 200 ms. Saturation is never damped.
+- **Range lanes:** once the analog gain is at the table maximum and the envelope is still starved, V5 switches the MODEM_DIAG taps to finer ADC bit sets: fine {9,7,6,5} (+6 dB) and ultrafine {9,6,5,4} (+12 dB). Inside their window these are an exact 2x/4x rescale of the coarse nibble (same angle, same Phase8 LUT, no calibration), and the analog gain trims between the 6 dB steps, so total gain is continuous. Without a carrier it listens on ultrafine. Rail codes or incoherent wide junk on a finer lane (the pre-fold warning / a folded strong carrier) return to coarse at once, and lanes are always the first gain removed.
 - The fast observer measures centered Q4 P50/P90/P95, phase coherence, clipping, and origin occupancy from completed RX buffers.
 - V4 is the sole automatic gain writer in the default profile. It chooses physical RF/BB/Fine gain tuples and verifies each write after its measured settle time.
 - Direct: the first window with P50 below 13 or above 32 triggers the full predicted correction in one step; saturation takes an immediate emergency drop.

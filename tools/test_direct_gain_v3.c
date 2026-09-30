@@ -158,6 +158,153 @@ int main(void)
     uint8_t pre_sat = v3.current_gain;
     assert(direct_gain_v3_tick(&v3, &sat) < pre_sat);
 
+    /* Range lanes: continuous total gain beyond the table maximum. */
+    {
+        uint8_t max = table.max_index;
+        uint64_t t = 20000000u;
+        direct_gain_v3_reset(&v3, &table, max, 62u);
+        /* Disabled by default: a starved envelope changes nothing. */
+        dg3_observation_t starved = obs(2, 2, 400, 0, 30, t);
+        assert(direct_gain_v3_tick(&v3, &starved) == max && v3.lane == 0u);
+
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        starved.observed_us = t += 1000u;
+        /* P50 2 -> x16 = 32: the finest lane lands in band in one step. */
+        assert(direct_gain_v3_tick(&v3, &starved) == max && v3.lane == 2u);
+        /* Windows that may hold pre-switch samples are ignored. */
+        dg3_observation_t early = obs(60, 110, 0, 300, 90, t + 100u);
+        assert(direct_gain_v3_tick(&v3, &early) == max && v3.lane == 2u);
+        /* A single-window burst of rail codes is ignored ... */
+        dg3_observation_t rail = obs(30, 70, 0, 40, 95, t += 1000u);
+        uint32_t drops = v3.fold_drops;
+        assert(direct_gain_v3_tick(&v3, &rail) == max && v3.lane == 2u);
+        dg3_observation_t quiet = obs(8, 20, 300, 0, 30, t += 200u);
+        (void)direct_gain_v3_tick(&v3, &quiet);
+        assert(v3.lane == 2u && v3.junk_windows == 0u);
+        /* ... persisting rail codes drop to coarse. */
+        rail.observed_us = t += 200u;
+        (void)direct_gain_v3_tick(&v3, &rail);
+        rail.observed_us = t += 200u;
+        assert(direct_gain_v3_tick(&v3, &rail) == max && v3.lane == 0u);
+        assert(v3.fold_drops == drops + 1u);
+        /* Re-entry is held off for 5 ms after a fold drop. */
+        dg3_observation_t none0 = obs(1, 3, 980, 0, 5, t += 1000u);
+        (void)direct_gain_v3_tick(&v3, &none0);
+        assert(v3.lane == 0u);
+        none0.observed_us = t += 5000u;
+        (void)direct_gain_v3_tick(&v3, &none0);
+        assert(v3.lane == 2u);
+
+        /* Folded junk (incoherent, wide, not quiet) also drops the lane. */
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        v3.lane = 2u; v3.lane_us = 0u;
+        dg3_observation_t junk = obs(20, 60, 100, 10, 12, t += 1000u);
+        (void)direct_gain_v3_tick(&v3, &junk);
+        junk.observed_us = t += 200u;
+        assert(direct_gain_v3_tick(&v3, &junk) == max && v3.lane == 0u);
+
+        /* P50 12 cannot land in the <6 dB band: take one lane (48) and let
+         * the analog gain trim the overshoot instead of dropping the lane. */
+        direct_gain_v3_reset(&v3, &table, max, 62u);
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        dg3_observation_t twelve = obs(10, 11, 0, 0, 95, t += 1000u);
+        (void)direct_gain_v3_tick(&v3, &twelve);
+        assert(v3.lane == 1u);
+        dg3_observation_t over = obs(48, 70, 0, 0, 95, t += 1000u);
+        uint8_t g = direct_gain_v3_tick(&v3, &over);
+        assert(v3.lane == 1u && g < max);
+
+        /* No carrier at the maximum: listen on the finest lane. */
+        direct_gain_v3_reset(&v3, &table, max, 62u);
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        dg3_observation_t none = obs(1, 3, 980, 0, 5, t += 1000u);
+        assert(direct_gain_v3_tick(&v3, &none) == max && v3.lane == 2u);
+        /* A strong VTX switching on folds: junk -> coarse. */
+        dg3_observation_t vtx = obs(40, 100, 50, 250, 20, t += 1000u);
+        (void)direct_gain_v3_tick(&v3, &vtx);
+        assert(v3.lane == 0u);
+
+        /* Lanes are never entered below the analog maximum. */
+        direct_gain_v3_reset(&v3, &table, 40u, 62u);
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        dg3_observation_t weak = obs(8, 14, 100, 0, 90, t += 1000u);
+        (void)direct_gain_v3_tick(&v3, &weak);
+        assert(v3.lane == 0u);
+    }
+
+    /* Noise cap: hardware VTX-off on ultrafine read P50 7 (sigma ~0.56
+     * coarse step). Fine already puts noise at ~1 step, so a carrier is
+     * held at fine; listening stays on ultrafine. */
+    {
+        uint8_t max = table.max_index;
+        uint64_t t = 40000000u;
+        direct_gain_v3_reset(&v3, &table, max, 62u);
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        dg3_observation_t none = obs(1, 3, 980, 0, 5, t);
+        (void)direct_gain_v3_tick(&v3, &none);
+        assert(v3.lane == 2u);
+        for (unsigned k = 0; k < 40u; ++k) {
+            dg3_observation_t noise = obs(7, 25, 340, 0, 31, t += 1000u);
+            (void)direct_gain_v3_tick(&v3, &noise);
+        }
+        assert(v3.lane == 2u && v3.lane_cap == 1u);
+        /* A weak carrier appears (coherent): come down to the cap. */
+        dg3_observation_t carrier_on_ultra = obs(9, 20, 100, 0, 80, t += 1000u);
+        (void)direct_gain_v3_tick(&v3, &carrier_on_ultra);
+        assert(v3.lane == 1u);
+    }
+
+    /* Overload removes BB gain before the RF stage (noise figure). */
+    {
+        uint8_t max = table.max_index;
+        direct_gain_v3_reset(&v3, &table, max, 62u);
+        const arc_gain_tuple_t top = v3.tuple[max];
+        dg3_observation_t sat = obs(70, 110, 0, 300, 90, 50000000u);
+        uint8_t g = direct_gain_v3_tick(&v3, &sat);
+        assert(g < max);
+        if (top.bb_code > 1u) assert(v3.tuple[g].rf_stage == top.rf_stage);
+    }
+    /* Saturation during the settle of an upward write acts at once. */
+    {
+        direct_gain_v3_reset(&v3, &table, 40u, 62u);
+        dg3_observation_t weak = obs(8, 14, 100, 0, 90, 60000000u);
+        uint8_t up = direct_gain_v3_tick(&v3, &weak);
+        assert(up > 40u);
+        direct_gain_v3_sync_applied(&v3, up, weak.observed_us);
+        assert(v3.state == DG3_SETTLE);
+        dg3_observation_t sat = obs(70, 110, 0, 300, 90, weak.observed_us + 50u);
+        assert(direct_gain_v3_tick(&v3, &sat) < up);
+        /* After a downward write a stale saturated window inside the 300 us
+         * floor is ignored (no double drop). */
+        uint8_t down = v3.current_gain;
+        direct_gain_v3_sync_applied(&v3, down, sat.observed_us);
+        dg3_observation_t stale = obs(70, 110, 0, 300, 90, sat.observed_us + 100u);
+        assert(direct_gain_v3_tick(&v3, &stale) == down);
+    }
+
+    /* Hardware regression: a weak carrier whose noise tails touch the rail
+     * on a finer lane every ~10th window must not hunt (was ~150 lane
+     * changes/s). One second of 200 us windows. */
+    {
+        uint8_t max = table.max_index;
+        uint64_t t = 70000000u;
+        direct_gain_v3_reset(&v3, &table, max, 62u);
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        uint32_t changes0 = v3.lane_changes;
+        for (unsigned w = 0; w < 5000u; ++w) {
+            unsigned scale = 1u << (2u * v3.lane);
+            unsigned p50 = 1u * scale, p95 = 4u * scale;
+            unsigned clip = (v3.lane && w % 10u < 2u) ? 25u : 0u;
+            dg3_observation_t o = obs((int)(p50 > 113u ? 113u : p50),
+                                      (int)(p95 > 113u ? 113u : p95), 300,
+                                      (int)clip, 60, t += 200u);
+            (void)direct_gain_v3_tick(&v3, &o);
+        }
+        printf("hunting regression: %u lane changes in 1 s, fold_streak %u\n",
+               (unsigned)(v3.lane_changes - changes0), v3.fold_streak);
+        assert(v3.lane_changes - changes0 < 60u);
+    }
+
     puts("direct gain v3 core: OK");
     return 0;
 }

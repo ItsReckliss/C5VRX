@@ -97,4 +97,4 @@ describe a diagnostic mode or future proof gate rather than the default build.
   active dump-SRAM reads, RX-attached BitScrambler, simultaneous RX+TX
   BitScrambler, >40 MB/s live TX overclocking, raw-Q4 observers on transformed
   rings, or a synthetic raster as the normal receiver.
-
+| Range max: dB budget, noise-referenced lanes, BW gear, sync flywheel + colour killer, two-bundle demod limits, hardware plan | [range-max.md](range-max.md) |
