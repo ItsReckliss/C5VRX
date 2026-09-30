@@ -20,6 +20,10 @@ typedef struct {
     uint8_t *ring;          /* raw IQ ring shared by RX and TX */
     uint32_t ring_pairs;    /* ring bytes / 2 */
     const uint8_t *phase;   /* Phase8 phase per raw byte (256 entries) */
+    /* History-conditioned demodulator (fm_hc.bsasm) when non-NULL:
+     * decoder[(prev_quadrant << 8) | raw] -> 5-bit state,
+     * pair[(prev << 5) | cur] -> DAC code. NULL = Phase8 endpoint codes. */
+    const uint8_t *hc_dec, *hc_pair;
 } sfw_ring_t;
 
 typedef enum { SFW_ACQUIRE = 0, SFW_TRACK = 1 } sfw_state_t;

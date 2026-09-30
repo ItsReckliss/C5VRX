@@ -61,10 +61,81 @@ static inline uint8_t endpoint(const sfw_ring_t *r, uint64_t k)
     return r->ring[idx(r, k) * 2u + 1u];
 }
 
-static inline uint8_t code_at(const sfw_ring_t *r, uint64_t k)
+/* Forward code cursor mirroring the live demodulator. Phase8 codes are
+ * stateless; HC codes depend on the retained state, so a window is opened
+ * 8 endpoints early and the recursion warms up (the decoder only differs
+ * from its bank-independent value on near-origin cells). Out-of-range or
+ * backward access reopens the window. */
+#define CUR_MAX 1024u
+static struct {
+    const sfw_ring_t *r;
+    uint64_t base;
+    uint32_t n;
+    uint8_t prev_state;
+    uint8_t code[CUR_MAX];
+    uint8_t state[CUR_MAX];
+} s_cur;
+
+static void cur_open(const sfw_ring_t *r, uint64_t from)
 {
-    return (uint8_t)(((128 + r->phase[endpoint(r, k)] -
-                       r->phase[endpoint(r, k - 1u)]) & 255) >> 2);
+    s_cur.r = r;
+    s_cur.base = from;
+    s_cur.n = 0;
+    if (r->hc_dec) {
+        uint8_t st = r->hc_dec[endpoint(r, from - 9u)];
+        for (uint64_t k = from - 8u; k < from; ++k)
+            st = r->hc_dec[((st >> 3) << 8) | endpoint(r, k)];
+        s_cur.prev_state = st;
+    }
+}
+
+static uint8_t code_at(const sfw_ring_t *r, uint64_t k)
+{
+    if (s_cur.r != r || k < s_cur.base || k >= s_cur.base + CUR_MAX)
+        cur_open(r, k);
+    while (s_cur.base + s_cur.n <= k) {
+        uint64_t j = s_cur.base + s_cur.n;
+        uint8_t c;
+        if (r->hc_dec) {
+            uint8_t prev = s_cur.n ? s_cur.state[s_cur.n - 1u] : s_cur.prev_state;
+            uint8_t st = r->hc_dec[((prev >> 3) << 8) | endpoint(r, j)];
+            c = r->hc_pair[(prev << 5) | st];
+            s_cur.state[s_cur.n] = st;
+        } else {
+            c = (uint8_t)(((128 + r->phase[endpoint(r, j)] -
+                            r->phase[endpoint(r, j - 1u)]) & 255) >> 2);
+        }
+        s_cur.code[s_cur.n++] = c;
+    }
+    return s_cur.code[k - s_cur.base];
+}
+
+/* HC synthesis cells per (decoder bank, state): the bank the hardware uses
+ * is the previous state's quadrant, which synthesis knows. Radius 3..7.5
+ * steps (preferring ~5) covers all 32 states in every bank. */
+static uint8_t s_cell_for_state[4][32];
+static const uint8_t *s_cell_lut_hc;
+
+static void build_hc_cells(const uint8_t *dec)
+{
+    if (!dec || s_cell_lut_hc == dec) return;
+    for (int bank = 0; bank < 4; ++bank) {
+        int best[32];
+        for (int t = 0; t < 32; ++t) best[t] = 1 << 30;
+        for (int raw = 0; raw < 256; ++raw) {
+            int q = (int8_t)((raw & 15) << 4) >> 4;
+            int i = (int8_t)(raw & 240) >> 4;
+            int r2x4 = (2 * i + 1) * (2 * i + 1) + (2 * q + 1) * (2 * q + 1);
+            if (r2x4 < 36 || r2x4 > 225) continue;
+            uint8_t st = dec[(bank << 8) | raw];
+            int score = r2x4 > 100 ? r2x4 - 100 : 100 - r2x4;
+            if (score < best[st]) {
+                best[st] = score;
+                s_cell_for_state[bank][st] = (uint8_t)raw;
+            }
+        }
+    }
+    s_cell_lut_hc = dec;
 }
 
 void sfw_init(sync_flywheel_t *f)
@@ -85,29 +156,55 @@ int sfw_standard(const sync_flywheel_t *f)
     return f->nominal_q8 == SFW_PAL_PERIOD_Q8 ? 1 : 2;
 }
 
-/* Emit a constant code over [a, b): each endpoint rotates by the phase
- * step that Phase8 maps to `code`; the middle byte splits the step so the
- * 40 MS/s trajectory stays smooth. Starts from the real preceding phase. */
+/* Emit a constant code over [a, b), starting from the real preceding
+ * phase/state. Phase8: each endpoint rotates by the phase step Phase8 maps to
+ * `code`. HC: each endpoint advances the 5-bit state by the step whose
+ * nominal pair code is closest (code = 20 + 6 * step). The middle byte splits
+ * the step so the 40 MS/s trajectory stays smooth. */
 static void synth(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t a,
                   uint64_t b, uint64_t floor, int code)
 {
-    int d = 4 * code - 126;
-    int prev = r->phase[endpoint(r, a - 1u)];
+    bool hc = r->hc_dec != NULL;
+    int d, prev;
+    /* HC codes step by 6 per state (20 + 6 * step): a fractional
+     * accumulator alternates steps so the mean hits `code`, like a real
+     * signal between two state steps does. */
+    int32_t d_q8 = 0, acc = 0;
+    if (hc) {
+        d_q8 = (int32_t)(code - 20) * 256 / 6;
+        d = 0;
+        cur_open(r, a);                       /* reads the ring as patched */
+        prev = s_cur.prev_state;
+    } else {
+        d = 4 * code - 126;
+        prev = r->phase[endpoint(r, a - 1u)];
+    }
     bool skipped = false;
     for (uint64_t k = a; k < b; ++k) {
         if (k < floor) {
-            prev = r->phase[endpoint(r, k)];
+            prev = hc ? r->hc_dec[((prev >> 3) << 8) | endpoint(r, k)]
+                      : r->phase[endpoint(r, k)];
             skipped = true;
             continue;
         }
-        uint8_t e = s_cell_for_phase[(prev + d) & 255];
-        uint8_t m = s_cell_for_phase[(prev + d / 2) & 255];
+        uint8_t e, m;
+        if (hc) {
+            acc += d_q8;
+            d = acc >= 0 ? (acc + 128) >> 8 : -((-acc + 128) >> 8);
+            acc -= d * 256;
+            e = s_cell_for_state[prev >> 3][(prev + d) & 31];
+            m = s_cell_for_state[prev >> 3][(prev + d / 2) & 31];
+        } else {
+            e = s_cell_for_phase[(prev + d) & 255];
+            m = s_cell_for_phase[(prev + d / 2) & 255];
+        }
         uint32_t at = idx(r, k) * 2u;
         r->ring[at] = m;
         r->ring[at + 1u] = e;
-        prev = r->phase[e];
+        prev = hc ? (prev + d) & 31 : r->phase[e];
     }
     if (skipped) ++f->skipped_floor;
+    s_cur.r = NULL;                           /* ring changed: drop cache */
 }
 
 static void acquire(sync_flywheel_t *f, const sfw_ring_t *r,
@@ -176,6 +273,8 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
     if (!f || !r || !r->ring || !r->phase || !r->ring_pairs ||
         (r->ring_pairs & (r->ring_pairs - 1u))) return 0;
     build_cells(r->phase);
+    build_hc_cells(r->hc_dec);
+    if (r->hc_dec && !r->hc_pair) return 0;
     if (f->state == SFW_ACQUIRE) {
         acquire(f, r, avail_end, max_scan);
         if (f->state == SFW_ACQUIRE) return 0;
@@ -212,14 +311,19 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
             }
             width -= highs;
         }
+        /* Normal H sync ~94, equalizing ~47, broad ~540. Only normal and
+         * broad pulses steer the PLL: short low runs also occur in noise
+         * (HC maps ~half of random cells to low codes). */
         bool normal = found >= 0 && width >= 70u && width <= 130u;
-        bool vertical = found >= 0 && !normal && (width >= 200u || width <= 60u);
+        bool broad = found >= 0 && width >= 200u;
+        bool equalizing = found >= 0 && width >= 40u && width <= 55u;
+        bool vertical = broad || equalizing;
         bool clean = normal && (!locked ||
                      (found >= -SFW_CLEAN_ERR && found <= SFW_CLEAN_ERR));
 
         /* PLL: phase gain 1/4, frequency gain 1/64, period within 0.3 %. */
         uint64_t base = f->next_q8;
-        if (normal || vertical) {
+        if (normal || broad) {
             int32_t err_q8 = found * 256;
             f->period_q8 += err_q8 / 64;
             int32_t lim = f->nominal_q8 / 333;

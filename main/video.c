@@ -44,6 +44,7 @@
 #include "direct_gain_v3.h"
 #include "sync_flywheel.h"
 #include "phase8_gain_lut.h"
+#include "fm_hc_lut.h"
 #include "phase8_envelope.h"
 #include "rx_auto_lab.h"
 #include "trajectory_v2_lut.h"
@@ -146,6 +147,7 @@ BITSCRAMBLER_PROGRAM(s_fm_program, "fm");
 BITSCRAMBLER_PROGRAM(s_fm_relative_golden_program, "fm_relative_golden");
 BITSCRAMBLER_PROGRAM(s_fm_phase5_360_program, "fm_phase5_360");
 BITSCRAMBLER_PROGRAM(s_fm_phase8_hr_live_program, "fm_phase8_hr_live");
+BITSCRAMBLER_PROGRAM(s_fm_hc_program, "fm_hc");
 BITSCRAMBLER_PROGRAM(s_fm_fsm_capture_program, "fm_phase5_fsm_capture");
 BITSCRAMBLER_PROGRAM(s_fm4_program, "fm4");
 
@@ -290,7 +292,13 @@ static TaskHandle_t s_v3_observer_task_handle;
  * killer. Both default on; clean lines are never modified. */
 static sync_flywheel_t s_sfw;
 static TaskHandle_t s_sfw_task_handle;
-static volatile bool s_sfw_enabled = true, s_sfw_colour_kill = true;
+/* Off by default: regenerating sync/blanking burst goes beyond the "recover
+ * the transmitted composite waveform" invariant (AGENTS.md) until a
+ * hardware A/B justifies changing it. */
+static volatile bool s_sfw_enabled = false, s_sfw_colour_kill = false;
+/* History-conditioned demodulator (fm_hc.bsasm), chosen per boot from NVS
+ * c5vrx/hc_demod = 1 ('P' toggles and reboots). Default Phase8 FULL. */
+static bool s_hc_demod;
 static volatile uint32_t s_sfw_rebases;
 #endif
 static TaskHandle_t s_v3_sentinel_task_handle;
@@ -1225,7 +1233,7 @@ static const char *output_mode_name(void)
 static const char *demod_mode_name(void)
 {
 #if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
-    return "PHASE8 HR TEST";
+    return s_hc_demod ? "HC TEST" : "PHASE8 HR TEST";
 #endif
     return "GOLDEN";
 }
@@ -1682,7 +1690,9 @@ static void sync_flywheel_task(void *arg)
 {
     (void)arg;
     const uint32_t ring_pairs = RAW_RING_BYTES / 2u;
-    const sfw_ring_t ring = { s_raw_ring, ring_pairs, c5vrx_phase8_gain_lut };
+    const sfw_ring_t ring = { s_raw_ring, ring_pairs, c5vrx_phase8_gain_lut,
+                              s_hc_demod ? c5vrx_hc_decoder : NULL,
+                              s_hc_demod ? c5vrx_hc_pair_code : NULL };
     uint64_t rx_abs = 0;
     uint32_t last_rx_off = UINT32_MAX;
     int64_t last_us = 0;
@@ -4033,6 +4043,7 @@ static void start_flight_demodulator(void)
     ESP_ERROR_CHECK(s_output_mode == VIDEO_OUTPUT_6BIT_40 ?
                     ESP_OK : ESP_ERR_INVALID_STATE);
     ESP_ERROR_CHECK(bitscrambler_load_program(s_flight_bs,
+                                             s_hc_demod ? s_fm_hc_program :
                                              s_fm_phase8_hr_live_program));
 #else
     if (s_output_mode == VIDEO_OUTPUT_4BIT_80) {
@@ -5350,6 +5361,22 @@ static void console_diag_task(void *arg)
                     s_sfw_enabled = !s_sfw_enabled;
                     printf("[SFW] sync flywheel repair %s\n",
                            s_sfw_enabled ? "ON" : "OFF");
+                } else if (c == 'P') {
+                    nvs_handle_t h;
+                    esp_err_t err = nvs_open("c5vrx", NVS_READWRITE, &h);
+                    if (err == ESP_OK) {
+                        err = nvs_set_u8(h, "hc_demod", s_hc_demod ? 0u : 1u);
+                        if (err == ESP_OK) err = nvs_commit(h);
+                        nvs_close(h);
+                    }
+                    printf("[DEMOD] -> %s on reboot err=%s\n",
+                           s_hc_demod ? "PHASE8 FULL" : "HC (history-conditioned)",
+                           esp_err_to_name(err));
+                    if (err == ESP_OK) {
+                        fflush(stdout);
+                        vTaskDelay(pdMS_TO_TICKS(150));
+                        esp_restart();
+                    }
                 } else if (c == 'M') {
                     s_sfw_colour_kill = !s_sfw_colour_kill;
                     printf("[SFW] colour killer %s\n",
@@ -5728,6 +5755,19 @@ esp_err_t video_start(void)
     if ((err = prepare_rx()) != ESP_OK) return err;
     if ((err = prepare_tx()) != ESP_OK) return err;
 
+#if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
+    {
+        nvs_handle_t h;
+        uint8_t hc = 0;
+        if (nvs_open("c5vrx", NVS_READONLY, &h) == ESP_OK) {
+            (void)nvs_get_u8(h, "hc_demod", &hc);
+            nvs_close(h);
+        }
+        s_hc_demod = hc == 1u;
+        ESP_LOGW(TAG, "Live demodulator: %s ('P' toggles, reboot)",
+                 s_hc_demod ? "HC (history-conditioned, fm_hc)" : "PHASE8 FULL");
+    }
+#endif
     start_flight_demodulator();
 
     /* Start RX cyclic ring. GDMA begins writing at s_raw_ring[0]. */
