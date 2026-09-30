@@ -5563,7 +5563,8 @@ esp_err_t video_start(void)
 #endif
 
     /* Start interactive console for on-demand diagnostics (zero periodic CPU/bus traffic) */
-    xTaskCreate(console_diag_task, "console_diag", 3072, NULL, 1, NULL);
+    /* 6 KiB: the P8ENV printf takes ~90 arguments (3 KiB overflowed). */
+    xTaskCreate(console_diag_task, "console_diag", 6144, NULL, 1, NULL);
 
     /* Start dedicated Analog Video AGC engine (slow physical actuator). */
     xTaskCreate(analog_agc_task, "analog_agc", 8192, NULL, 3, NULL);
