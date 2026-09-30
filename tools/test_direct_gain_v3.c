@@ -232,6 +232,28 @@ int main(void)
         assert(v3.lane == 0u);
     }
 
+    /* Noise cap: hardware VTX-off on ultrafine read P50 7 (sigma ~0.56
+     * coarse step). Fine already puts noise at ~1 step, so a carrier is
+     * held at fine; listening stays on ultrafine. */
+    {
+        uint8_t max = table.max_index;
+        uint64_t t = 40000000u;
+        direct_gain_v3_reset(&v3, &table, max, 62u);
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        dg3_observation_t none = obs(1, 3, 980, 0, 5, t);
+        (void)direct_gain_v3_tick(&v3, &none);
+        assert(v3.lane == 2u);
+        for (unsigned k = 0; k < 40u; ++k) {
+            dg3_observation_t noise = obs(7, 25, 340, 0, 31, t += 1000u);
+            (void)direct_gain_v3_tick(&v3, &noise);
+        }
+        assert(v3.lane == 2u && v3.lane_cap == 1u);
+        /* A weak carrier appears (coherent): come down to the cap. */
+        dg3_observation_t carrier_on_ultra = obs(9, 20, 100, 0, 80, t += 1000u);
+        (void)direct_gain_v3_tick(&v3, &carrier_on_ultra);
+        assert(v3.lane == 1u);
+    }
+
     puts("direct gain v3 core: OK");
     return 0;
 }

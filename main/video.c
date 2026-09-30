@@ -268,7 +268,7 @@ typedef enum {
     RX_PROFILE_COUNT,
 } rx_profile_t;
 
-static volatile rf_bw_mode_t s_rf_bw_mode = RF_BW_MODE_BW40;
+static volatile rf_bw_mode_t s_rf_bw_mode = RF_BW_MODE_AUTO;
 static volatile bool s_current_bw40 = true;
 static volatile video_output_mode_t s_output_mode = VIDEO_OUTPUT_6BIT_40;
 static video_output_mode_t s_tx_unit_mode = VIDEO_OUTPUT_6BIT_40;
@@ -279,6 +279,9 @@ static direct_gain_v2_t s_direct_gain_v2;
 #if CONFIG_C5VRX_DIRECT_GAIN_V3_EXPERIMENT
 static direct_gain_v3_t s_direct_gain_v3;
 static volatile int s_v3_p50, s_v3_p90, s_v3_p95, s_v3_origin_pm;
+/* Receiver DC at maximum gain (quiet windows), milli-steps of lane 0. */
+static volatile int s_v3_dc_i_mstep, s_v3_dc_q_mstep;
+static volatile uint32_t s_v3_bw_switches;
 static volatile int s_v3_clip_pm, s_v3_coherence;
 static TaskHandle_t s_v3_observer_task_handle;
 static TaskHandle_t s_v3_sentinel_task_handle;
@@ -1597,6 +1600,65 @@ static void direct_gain_v3_sentinel_task(void *arg)
     }
 }
 
+/* Receiver DC at maximum gain, from quiet (no-carrier) windows: mean signed
+ * nibble relative to the bucket centre, rescaled to lane-0 milli-steps. At
+ * ~0.6 step of noise a DC of a few tenths of a step biases the quantizer
+ * cells; this measures whether that matters before any LUT compensation. */
+static void direct_gain_v5_dc_observe(const uint8_t *sample, size_t bytes,
+                                      const dg3_observation_t *o)
+{
+    const direct_gain_v3_t *v3 = &s_direct_gain_v3;
+    if (v3->current_gain != v3->table.max_index || !v3->lane ||
+        o->clip_pm || o->coherence >= 45u || o->p95 >= 40u || !bytes) return;
+    int32_t si = 0, sq = 0;
+    for (size_t n = 0; n < bytes; ++n) {
+        si += 2 * ((int8_t)(sample[n] & 0xF0u) >> 4) + 1;
+        sq += 2 * ((int8_t)(uint8_t)(sample[n] << 4) >> 4) + 1;
+    }
+    /* mean(2x+1)/2 steps -> milli-steps of this lane -> lane-0 units. */
+    int di = (int)(si * 500 / (int32_t)bytes) >> v3->lane;
+    int dq = (int)(sq * 500 / (int32_t)bytes) >> v3->lane;
+    s_v3_dc_i_mstep = (7 * s_v3_dc_i_mstep + di) / 8;
+    s_v3_dc_q_mstep = (7 * s_v3_dc_q_mstep + dq) / 8;
+}
+
+/* V5 bandwidth gear (RF BW mode AUTO). BW20 halves the noise bandwidth (~3 dB
+ * CNR) but trims wideband-FM detail/chroma, so it is the last gear: only at
+ * maximum analog gain, on the noise-referenced lane cap, with a present but
+ * starved or incoherent carrier for 1 s. It returns to BW40 after 1 s of
+ * clear recovery. Each switch is a rare PHY write; the gain epoch is bumped
+ * so no measurement straddles it. */
+#define V5_BW_DWELL_US 1000000u
+static void direct_gain_v5_bw_gear(const dg3_observation_t *o)
+{
+    static uint64_t weak_since, strong_since;
+    const direct_gain_v3_t *v3 = &s_direct_gain_v3;
+    if (s_rf_bw_mode != RF_BW_MODE_AUTO) { weak_since = strong_since = 0; return; }
+    uint64_t now = o->observed_us;
+    bool at_max = v3->current_gain == v3->table.max_index;
+    bool present = o->origin_pm < 650u && o->coherence >= 30u;
+    bool edge = at_max && v3->lane >= v3->lane_cap && present &&
+                (o->p50 < 13u || o->coherence < 70u);
+    bool clear = (!at_max || v3->lane == 0u) && o->p50 >= 13u &&
+                 o->coherence >= 85u;
+    if (s_current_bw40) {
+        strong_since = 0;
+        if (!edge) { weak_since = 0; return; }
+        if (!weak_since) weak_since = now;
+        if (now - weak_since < V5_BW_DWELL_US) return;
+        apply_rf_bandwidth(false);
+    } else {
+        weak_since = 0;
+        if (!clear) { strong_since = 0; return; }
+        if (!strong_since) strong_since = now;
+        if (now - strong_since < V5_BW_DWELL_US) return;
+        apply_rf_bandwidth(true);
+    }
+    weak_since = strong_since = 0;
+    ++s_v3_bw_switches;
+    ++s_gain_transition_count;
+}
+
 /* Observe four separated 64-byte regions in the latest completed descriptor.
  * This task never touches a descriptor still owned by the RX DMA engine and
  * never participates in the 40 MS/s video clock. Only this task writes gain. */
@@ -1669,6 +1731,8 @@ static void direct_gain_v3_observer_task(void *arg)
         s_v3_coherence = observation.coherence;
         uint8_t target = direct_gain_v3_tick(&s_direct_gain_v3, &observation);
         direct_gain_v3_apply_target(target, profile);
+        direct_gain_v5_dc_observe(sample, sizeof(sample), &observation);
+        direct_gain_v5_bw_gear(&observation);
     }
 }
 #endif
@@ -1730,7 +1794,7 @@ static void settings_load(void)
         (!legacy_v3 && settings.version != SETTINGS_VERSION)) {
         s_rx_profile = RX_PROFILE_DIRECT_GAIN; /* legacy: s_rx_profile = RX_PROFILE_ARC */
         s_demod_mode = DEMOD_MODE_GOLDEN_PHASE5;
-        s_rf_bw_mode = RF_BW_MODE_BW40;
+        s_rf_bw_mode = RF_BW_MODE_AUTO; /* V5 gear: starts BW40 */
         s_afc_mode = AFC_MODE_OFF;
         s_agc_mode = ANALOG_AGC_ACTIVE;
         s_current_gain = rf_get_arc_survival_gain();
@@ -1753,7 +1817,7 @@ static void settings_load(void)
                    RX_PROFILE_DIRECT_GAIN_V1 :
                    settings.rx_profile == RX_PROFILE_ARC_V3_EXP ?
                    RX_PROFILE_ARC_V3_EXP : RX_PROFILE_DIRECT_GAIN;
-    s_rf_bw_mode = RF_BW_MODE_BW40;
+    s_rf_bw_mode = RF_BW_MODE_AUTO; /* V5 gear: starts BW40 */
     s_afc_mode = AFC_MODE_OFF;
     apply_rf_bandwidth(true);
     if (s_video_std_mode == VIDEO_STD_MODE_PAL) s_video_std = VIDEO_STD_PAL;
@@ -1986,13 +2050,19 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            transport_age_ms, (unsigned long)s_last_transport_flags);
 #if CONFIG_C5VRX_DIRECT_GAIN_V3_EXPERIMENT
     printf("DG3_OBS p50=%d p90=%d p95=%d origin_pm=%d clip_pm=%d coherence=%d "
-           "state=%u gain=%u lane=%u lane_changes=%lu fold_drops=%lu "
+           "state=%u gain=%u lane=%u lane_cap=%u noise_r2_q4=%u "
+           "dc_i_mstep=%d dc_q_mstep=%d bw40=%u bw_switches=%lu "
+           "lane_changes=%lu fold_drops=%lu "
            "virtual_q8=%ld writes=%lu holds=%lu verified=%lu learned=%lu "
            "settle_fine_us=%u settle_bb_us=%u settle_rf_us=%u\n",
            s_v3_p50, s_v3_p90, s_v3_p95, s_v3_origin_pm, s_v3_clip_pm,
            s_v3_coherence,
            (unsigned)s_direct_gain_v3.state, s_current_gain,
            (unsigned)rf_get_iq_lanes(),
+           (unsigned)s_direct_gain_v3.lane_cap,
+           (unsigned)s_direct_gain_v3.noise_p50_q4,
+           s_v3_dc_i_mstep, s_v3_dc_q_mstep,
+           s_current_bw40 ? 1u : 0u, (unsigned long)s_v3_bw_switches,
            (unsigned long)s_direct_gain_v3.lane_changes,
            (unsigned long)s_direct_gain_v3.fold_drops,
            (long)s_direct_gain_v3.virtual_gain_q8,
@@ -4993,8 +5063,10 @@ profile_post_gain:
         /* Experimental automatic RF bandwidth gearbox.
          * BW40 -> BW20 only after 200 ms of deep fade at high gain.
          * BW20 -> BW40 requires 1 s of strong coherent recovery. */
-        if (s_rf_bw_mode == RF_BW_MODE_AUTO) {
-            /* TRACK is a hard no-write zone. Filter switching is allowed only
+        if (s_rf_bw_mode == RF_BW_MODE_AUTO &&
+            s_rx_profile != RX_PROFILE_DIRECT_GAIN) {
+            /* Direct Gain owns its own gear (direct_gain_v5_bw_gear).
+             * TRACK is a hard no-write zone. Filter switching is allowed only
              * while acquiring/relearning a carrier; once locked, preserve the
              * exact RF/PHY state so a bandwidth write cannot corrupt CVBS sync. */
             if (s_agc_state == AGC_STATE_TRACK) {

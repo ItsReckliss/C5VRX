@@ -59,6 +59,12 @@ typedef struct {
      * entered only at the table's maximum analog gain; after that the analog
      * gain fine-tunes between the 6 dB lane steps. */
     uint8_t lane, lane_max, junk_windows;
+    /* Noise-referenced lane cap: receiver noise r^2 (P50 - 1) at maximum
+     * analog gain, learned (Q4 fixed point, lane-0 units) from quiet windows.
+     * Lanes finer than the one where noise reaches ~1 step only resolve
+     * noise and cost fold headroom. 0 = not yet measured (no cap). */
+    uint16_t noise_p50_q4;
+    uint8_t lane_cap;
     uint64_t lane_us, lane_hold_until_us;
     uint32_t lane_changes, fold_drops;
 } direct_gain_v3_t;

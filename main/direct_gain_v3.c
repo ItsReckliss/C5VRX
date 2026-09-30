@@ -40,6 +40,11 @@ static bool s_lut_ready;
  * saturation still drops at once. After a fold drop the lanes are not
  * re-entered for DG3_LANE_HOLD_US. */
 #define DG3_JUNK_WINDOWS    2u
+/* The power metric is r^2 + ~1 (bucket centres), so lane scaling is exact
+ * on r^2 = P50 - 1. Target median noise r^2 ~1.25 step^2, i.e. sigma ~0.95
+ * step per axis, where the 4-bit quantizer is effectively linear (Widrow:
+ * the loss is already small from ~0.5 step). Q4 fixed point. */
+#define DG3_NOISE_R2_TARGET_Q4 20u
 #define DG3_LANE_HOLD_US    5000u
 
 static int clamp_i(int value, int low, int high)
@@ -420,14 +425,15 @@ static uint8_t lane_for(const direct_gain_v3_t *v3,
                         const dg3_observation_t *o, bool up)
 {
     if (up) {
-        for (int k = (int)v3->lane_max - (int)v3->lane; k >= 1; --k) {
+        int top = (int)v3->lane_cap - (int)v3->lane;
+        for (int k = top; k >= 1; --k) {
             unsigned p50 = scale_power(o->p50, k), p95 = scale_power(o->p95, k);
             if (p50 <= 32u && p95 <= 65u) return (uint8_t)(v3->lane + k);
         }
         /* No lane lands inside the (<6 dB wide) band: take the smallest
          * step that reaches it without rail codes; the analog gain then
          * trims the overshoot down in its fine steps. */
-        for (int k = 1; k <= (int)v3->lane_max - (int)v3->lane; ++k) {
+        for (int k = 1; k <= top; ++k) {
             unsigned p50 = scale_power(o->p50, k), p95 = scale_power(o->p95, k);
             if (p50 >= 13u && p95 <= 72u) return (uint8_t)(v3->lane + k);
         }
@@ -444,7 +450,27 @@ void direct_gain_v3_enable_lanes(direct_gain_v3_t *v3, uint8_t lane_max)
 {
     if (!v3) return;
     v3->lane_max = lane_max;
+    v3->lane_cap = lane_max;
     v3->lane = 0u;
+}
+
+/* Learn the receiver noise from a no-carrier window at maximum gain and
+ * derive the finest useful lane. Lane k scales power by exactly 4^k, so one
+ * measurement on any lane gives the noise on all of them. */
+static void learn_noise(direct_gain_v3_t *v3, const dg3_observation_t *o)
+{
+    if (!v3->lane_max || !v3->lane || o->p50 < 2u) return;
+    uint32_t lane0_q4 = ((uint32_t)(o->p50 - 1u) << 4) >> (2u * v3->lane);
+    if (!lane0_q4) lane0_q4 = 1u;
+    v3->noise_p50_q4 = v3->noise_p50_q4 ?
+        (uint16_t)((7u * v3->noise_p50_q4 + lane0_q4) / 8u) :
+        (uint16_t)lane0_q4;
+    uint8_t cap = v3->lane_max;
+    for (uint8_t k = 0; k <= v3->lane_max; ++k) {
+        if (((uint32_t)v3->noise_p50_q4 << (2u * k)) >=
+            DG3_NOISE_R2_TARGET_Q4) { cap = k; break; }
+    }
+    v3->lane_cap = cap;
 }
 
 static uint8_t start_write(direct_gain_v3_t *v3,
@@ -502,8 +528,18 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
         return set_lane(v3, o, 0u);
     }
     v3->junk_windows = 0;
-    bool lane_up_ok = at_max && v3->lane < v3->lane_max &&
+    /* Listening always uses the finest lane (most sensitive carrier
+     * detection, and it measures the noise); with a carrier the lanes stop
+     * at the noise-referenced cap. */
+    bool quiet = v3->lane && at_max && !carrier(o) &&
+                 o->clip_pm == 0u && o->p95 < 40u && o->coherence < 45u;
+    if (quiet) learn_noise(v3, o);
+    uint8_t lane_limit = (no_carrier || quiet) ? v3->lane_max : v3->lane_cap;
+    bool lane_up_ok = at_max && v3->lane < lane_limit &&
                       o->observed_us >= v3->lane_hold_until_us;
+    /* A carrier found while listening above the cap comes down to it. */
+    if (carrier(o) && v3->lane > v3->lane_cap)
+        return set_lane(v3, o, v3->lane_cap);
     if (no_carrier && lane_up_ok) {
         /* Listen on the finest lane: a carrier below one coarse step becomes
          * visible there. A strong carrier appearing is caught by the fold
@@ -511,7 +547,7 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
         v3->state = DG3_ACQUIRE;
         v3->high_windows = v3->weak_windows = 0;
         v3->last_direction = 0;
-        return set_lane(v3, o, v3->lane_max);
+        return set_lane(v3, o, lane_limit);
     }
     if (no_carrier) {
         /* No usable carrier: listen at the table's maximum gain, not at the
