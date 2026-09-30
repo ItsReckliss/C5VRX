@@ -4351,16 +4351,19 @@ static void channel_auto_search(void)
              * exactly 20 MHz away also reads "centred" (hardware: A2, E5,
              * F6 around an A1 VTX; one scan picked A2). There the VTX sits
              * on the filter edge and is weak, so among centred candidates
-             * the strongest RF wins (A1 rf=168 vs 0), then confidence,
-             * then the smaller offset. */
+             * the strongest RF wins (A1 rf=168 vs 0), then the better
+             * centred one in 500 kHz steps (B8 at 5866 MHz reads the same
+             * RF as A1 but -1040 vs -14 kHz), then confidence. */
             bool centred = off <= 3000;
             bool best_centred = best_offset <= 3000;
+            int off_bucket = off / 500, best_bucket = best_offset / 500;
             if ((centred && !best_centred) ||
                 (centred == best_centred &&
                  (rank > best_rank ||
                   (rank == best_rank &&
-                   (video.confidence > best_video ||
-                    (video.confidence == best_video && off < best_offset)))))) {
+                   (off_bucket < best_bucket ||
+                    (off_bucket == best_bucket &&
+                     video.confidence > best_video)))))) {
                 best_offset = off;
                 best_video = video.confidence;
                 best_rank = rank;
