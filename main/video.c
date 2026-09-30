@@ -4345,15 +4345,22 @@ static void channel_auto_search(void)
                    video.standard == 1 ? "PAL" : "NTSC", rank);
             /* The BW40 filter lets a VTX through on neighbouring channels
              * too (hardware: A1's VTX gave valid video on B8/F7/F8/R7), and
-             * the confidence ignores offset by design. Choose the channel
-             * the carrier is centred on: smallest |offset| (500 kHz
-             * buckets), then confidence, then RF rank. */
-            int off_bucket = off / 500;
-            int best_bucket = best_offset / 500;
-            if (off_bucket < best_bucket ||
-                (off_bucket == best_bucket &&
-                 (video.confidence > best_video ||
-                  (video.confidence == best_video && rank > best_rank)))) {
+             * the confidence ignores offset by design. Only a carrier
+             * centred within 3 MHz qualifies. That alone is not enough: the
+             * 50 ns offset measurement wraps every 20 MHz, so a channel
+             * exactly 20 MHz away also reads "centred" (hardware: A2, E5,
+             * F6 around an A1 VTX; one scan picked A2). There the VTX sits
+             * on the filter edge and is weak, so among centred candidates
+             * the strongest RF wins (A1 rf=168 vs 0), then confidence,
+             * then the smaller offset. */
+            bool centred = off <= 3000;
+            bool best_centred = best_offset <= 3000;
+            if ((centred && !best_centred) ||
+                (centred == best_centred &&
+                 (rank > best_rank ||
+                  (rank == best_rank &&
+                   (video.confidence > best_video ||
+                    (video.confidence == best_video && off < best_offset)))))) {
                 best_offset = off;
                 best_video = video.confidence;
                 best_rank = rank;
