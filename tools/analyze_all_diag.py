@@ -107,6 +107,38 @@ PASS_METADATA = {
         "target_bus": "CTRL_UPPER",
         "reference_bits": (6, 7),
     },
+    5: {
+        "name": "CAND_123",
+        "lanes": [5, 6, 7, 9, 15, 16, 17, 19],
+        "signal_names": {
+            0: ("DIAG[5]",  "Proven Q[5]"),
+            1: ("DIAG[6]",  "Proven Q[6] [REF]"),
+            2: ("DIAG[7]",  "Proven Q[7] [REF]"),
+            3: ("DIAG[9]",  "Proven Q[9] [REF]"),
+            4: ("DIAG[15]", "Candidate I[5]"),
+            5: ("DIAG[16]", "Proven I[6] [REF]"),
+            6: ("DIAG[17]", "Proven I[7] [REF]"),
+            7: ("DIAG[19]", "Proven I[9] [REF]"),
+        },
+        "target_bus": "CAND_123",
+        "reference_bits": (1, 2, 3, 5, 6, 7),
+    },
+    6: {
+        "name": "I_BUS_4_9",
+        "lanes": [14, 15, 16, 17, 18, 19, 8, 9],
+        "signal_names": {
+            0: ("DIAG[14]", "Candidate I[4]"),
+            1: ("DIAG[15]", "Candidate I[5]"),
+            2: ("DIAG[16]", "Proven I[6] [REF]"),
+            3: ("DIAG[17]", "Proven I[7] [REF]"),
+            4: ("DIAG[18]", "Proven I[8] [REF]"),
+            5: ("DIAG[19]", "Proven I[9] [REF]"),
+            6: ("DIAG[8]",  "Proven Q[8] [REF]"),
+            7: ("DIAG[9]",  "Proven Q[9] [REF]"),
+        },
+        "target_bus": "I_ALIGNED",
+        "reference_bits": (2, 3, 4, 5, 6, 7),
+    },
 }
 
 

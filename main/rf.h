@@ -79,11 +79,10 @@ const rf_phy_snapshot_t *rf_get_arc_receive_tuple(void);
 void rf_set_fft_scale_force(bool force, int8_t value);
 
 /**
- * Issue #117/#119 native hardware AGC: the default gain owner.
+ * Native hardware AGC (#117/#119): opt-in; Direct Gain V4 is the default.
  *
- * Firmware gain control is the opt-in fallback. The choice applies to the NEXT
- * boot only (persisted in NVS, caller reboots); no stored value means native.
- * When
+ * Selected for the NEXT boot only (persisted in NVS, caller reboots); no
+ * stored value means firmware gain (Direct Gain V4). When
  * active, rf_start() never calls phy_disable_agc()/phy_rfagc_disable(), releases
  * forced gain and FFT scale once, and every later rf_set_rx_gain() or FFT force
  * is refused and counted in blocked_writes. The registers are raw read-only

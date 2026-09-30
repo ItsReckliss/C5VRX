@@ -9,6 +9,8 @@
 #include "rf.h"
 #include "video.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "bs_relative_worker_probe.h"
 #include "bs_relative_middle_probe.h"
 #include "bs_addctia_probe.h"
@@ -27,6 +29,9 @@ void app_main(void)
 #endif
     ESP_ERROR_CHECK(rf_start());
 #if CONFIG_C5VRX_PHY_PHASE_TAP_PROBE
+    /* Give the host time to reopen the USB console after reset, otherwise
+     * the boot-only report is printed before anyone listens. */
+    vTaskDelay(pdMS_TO_TICKS(8000));
     phy_phase_tap_probe_run();
 #endif
     ESP_ERROR_CHECK(video_start());

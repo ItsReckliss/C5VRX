@@ -1119,6 +1119,7 @@ typedef enum {
 
 static const char *rx_profile_name(void)
 {
+    if (rf_native_agc_active()) return "NATIVE HW AGC";
     switch (s_rx_profile) {
     case RX_PROFILE_RANGE_EXP:    return "RANGE EXP";
     case RX_PROFILE_BLOCKER_EXP:  return "BLOCKER EXP";
@@ -1130,7 +1131,7 @@ static const char *rx_profile_name(void)
     case RX_PROFILE_ARC_V3_EXP:  return "ARC V3 EXP";
     case RX_PROFILE_ARC_V5_AUTOTUNE_EXP: return "ARC V5 AUTOTUNE";
 #if CONFIG_C5VRX_DIRECT_GAIN_V3_EXPERIMENT
-    case RX_PROFILE_DIRECT_GAIN: return "DIRECT GAIN V3 TEST";
+    case RX_PROFILE_DIRECT_GAIN: return "DIRECT GAIN V4";
 #else
     case RX_PROFILE_DIRECT_GAIN: return "DIRECT GAIN V2";
 #endif
@@ -2627,10 +2628,10 @@ static void lab_request_fresh_phy_calibration(void)
     esp_restart();
 }
 
-/* Issue #117/#119: native hardware AGC is the default, chosen per boot because
- * the vendor loop cannot be restored after C5VRX disables it. 'N' flips to the
- * firmware gain fallback (or back) and reboots; rf_start() decides ownership
- * before PHY use. */
+/* Native hardware AGC is an opt-in per-boot choice (Direct Gain V4 is the
+ * default) because the vendor loop cannot be restored after C5VRX disables
+ * it. 'N' and the RF page profile cycle flip it and reboot; rf_start()
+ * decides ownership before PHY use. */
 static void lab_toggle_native_agc_boot(void)
 {
     if (s_gain_sweep.active || s_menu_active || s_pre_q4_probe_active) {
@@ -3360,8 +3361,32 @@ static void apply_rx_profile(rx_profile_t profile)
     video_standard_detector_reset();
 }
 
+static void arm_native_agc_and_reboot(bool enable)
+{
+    settings_save();
+    esp_err_t err = rf_request_native_agc_boot(enable);
+    printf("[RX PROFILE] -> %s on reboot err=%s\n",
+           enable ? "NATIVE HW AGC" : "DIRECT GAIN V4", esp_err_to_name(err));
+    if (err != ESP_OK) return;
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(150));
+    esp_restart();
+}
+
 static void cycle_rx_profile(void)
 {
+    /* Direct Gain V4 is the default. Native hardware AGC stays selectable as
+     * the last stop of the cycle; it is chosen per boot, so entering and
+     * leaving it reboots (docs/native-agc-v2.md explains why it is not the
+     * default: it re-acquires 1-2x per video line on a different gain). */
+    if (rf_native_agc_active()) {
+        arm_native_agc_and_reboot(false);
+        return;
+    }
+    if (s_rx_profile == RX_PROFILE_ARC_V3_EXP) {
+        arm_native_agc_and_reboot(true);
+        return;
+    }
     rx_profile_t next = s_rx_profile == RX_PROFILE_DIRECT_GAIN ?
                         RX_PROFILE_DIRECT_GAIN_V1 :
                         s_rx_profile == RX_PROFILE_DIRECT_GAIN_V1 ?
@@ -3717,11 +3742,10 @@ static void menu_draw_channel_page(void)
 static void menu_draw_rf_page(void)
 {
     char buf[32];
-    /* Native hardware AGC is the only gain choice offered on screen (#119).
-     * The firmware-gain fallback exists only behind the serial 'N' command. */
-    bool native = rf_native_agc_active();
-    menu_draw_page_title("RF FRONTEND", native ? "DEFAULT" : "SERIAL FALLBACK");
-    menu_ui_value_box(100, 22, 276, "GAIN", native ? "NATIVE HW AGC" : "FIRMWARE (SERIAL N)");
+    menu_draw_page_title("RF FRONTEND",
+                         rf_native_agc_active() ? "OPTION" :
+                         s_rx_profile == RX_PROFILE_DIRECT_GAIN ? "DEFAULT" : "A/B");
+    menu_ui_value_box(100, 22, 276, "RX PROFILE", rx_profile_name());
     menu_ui_value_box(100, 34, 130, "BANDWIDTH", rf_bw_mode_name());
     snprintf(buf, sizeof(buf), "S%u", (unsigned)s_signal_strength);
     menu_ui_value_box(238, 34, 138, "SIGNAL", buf);
@@ -5475,9 +5499,9 @@ esp_err_t video_start(void)
     if (rf_native_agc_active()) {
         rf_native_agc_state_t native;
         rf_get_native_agc_state(&native);
-        ESP_LOGW(TAG, "NATIVE HW AGC (default): vendor AGC never disabled, "
+        ESP_LOGW(TAG, "NATIVE HW AGC (opt-in): vendor AGC never disabled, "
                  "firmware gain writes blocked (gain_reg=0x%08lx agc_reg=0x%08lx). "
-                 "'E' = P8ENV row, 'N' = reboot to firmware gain fallback",
+                 "'E' = P8ENV row, 'N' = reboot to Direct Gain V4",
                  (unsigned long)native.gain_status_reg,
                  (unsigned long)native.agc_ctrl_reg);
     }
@@ -5566,7 +5590,8 @@ esp_err_t video_start(void)
 #endif
 
     /* Start interactive console for on-demand diagnostics (zero periodic CPU/bus traffic) */
-    xTaskCreate(console_diag_task, "console_diag", 3072, NULL, 1, NULL);
+    /* 6 KiB: the P8ENV printf takes ~90 arguments (3 KiB overflowed). */
+    xTaskCreate(console_diag_task, "console_diag", 6144, NULL, 1, NULL);
 
     /* Start dedicated Analog Video AGC engine (slow physical actuator). */
     xTaskCreate(analog_agc_task, "analog_agc", 8192, NULL, 3, NULL);

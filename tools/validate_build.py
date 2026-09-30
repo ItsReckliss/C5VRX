@@ -713,10 +713,10 @@ check("Native HW AGC experiment never disables vendor AGC and blocks firmware ga
                 r"if \(s_native_agc\) \{\s*\+\+s_native_agc_blocked_writes;\s*return;", rf_c) and
       "if (rf_native_agc_active()) return s_current_gain;" in video_c and
       "} else if (c == 'N') {" in video_c)
-check("Native HW AGC is the default boot gain owner; firmware gain needs explicit NVS 0",
+check("Direct Gain V4 is the default boot gain owner; native AGC needs explicit NVS 1",
       re.search(r"static bool native_agc_boot_requested\(void\)\s*\{\s*nvs_handle_t handle;\s*"
-                r"uint8_t value = 1u;", rf_c) and
-      "return value != 0u;" in rf_c)
+                r"uint8_t value = 0;", rf_c) and
+      "return value == 1u;" in rf_c)
 check("RSSI probe owns every AGC/BW/AFC write during its measurement",
       "s_rssi_probe_active = true;" in video_c and
       "if (s_rssi_probe_active) continue;" in video_c and

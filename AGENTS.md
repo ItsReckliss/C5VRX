@@ -58,12 +58,18 @@ requirements by themselves**.
 
 ## Current realtime invariants
 
+- **Direct Gain V4 is the default gain owner** (Direct Gain V3 core, direct
+  first-window correction, table-maximum listening without a carrier). Native
+  hardware AGC is an opt-in menu/`N` option only: on a continuous carrier the
+  C5 packet AGC re-acquires every ~21 us on a different gain, which caused
+  the line noise and grain (docs/native-agc-v2.md). Do not make native AGC
+  the default again without a new hardware comparison that beats V4.
+
 - VTX presence and USB must never gate or pace IQ production.
-- Native ESP32-C5 hardware AGC is the default receive gain owner (#119). In that
-  mode never call `phy_disable_agc()` / `phy_rfagc_disable()` and never force
-  RX gain; every firmware gain write must stay refused at `rf_set_rx_gain()`.
-  Firmware gain controllers (Direct Gain V3 etc.) run only after `N` stores an
-  explicit NVS `c5vrx/native_agc = 0`.
+- Native ESP32-C5 hardware AGC is opt-in (NVS `c5vrx/native_agc = 1`, set by
+  `N` or the RF page profile cycle). In that mode never call
+  `phy_disable_agc()` / `phy_rfagc_disable()` and never force RX gain; every
+  firmware gain write must stay refused at `rf_set_rx_gain()`.
 - The normal live source is MODEM_DIAG Q4/I4 captured by PARLIO RX; active
   MAC-owned dump SRAM is a diagnostic writer, not a readable live source.
 - Do not turn a physical SRAM or DMA block boundary into a DSP reset.

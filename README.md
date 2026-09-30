@@ -20,38 +20,42 @@
 
 ## Current firmware
 
-The `main` build defaults to the live adjacent Phase8 demodulator and the
-ESP32-C5 **native hardware AGC**. Phase8 maps the full signed adjacent phase
-delta (-128 through +127) to the 6-bit DAC. A transition across the +/-180
-degree phase boundary can still alias. With native AGC the firmware never
-disables Espressif's AGC and makes zero gain writes. Direct Gain V3 remains
-available as the firmware gain fallback: press `N` on the console to reboot
-into it, and `N` again to return to native AGC.
+The `main` build defaults to the live adjacent Phase8 demodulator and
+**Direct Gain V4**, the default and recommended gain controller. Phase8 maps
+the full signed adjacent phase delta (-128 through +127) to the 6-bit DAC. A
+transition across the +/-180 degree phase boundary can still alias.
 
-In an operator walk test (issue #119) native AGC gave a clean picture from
-close range to the point where the picture degraded. At that same spot, Direct
-Gain V3 sat at gain 62 with every Q4 sample in the four origin cells. See
-[docs/phase8-range-envelope.md](docs/phase8-range-envelope.md). This is one
-walk test, not a controlled attenuation sweep.
+Direct Gain V4 is the Direct Gain V3 core (centered Q4 amplitude and Phase8
+coherence, physical RF/BB/Fine tuples, zero-write hold while healthy) with two
+changes: it acts on the first 1 ms window that leaves the healthy band and
+jumps straight to the predicted gain (about 1-2 ms instead of tens to hundreds
+of ms), and without a carrier it listens at the gain table's maximum instead of
+parking at G62, so weak carriers at the range edge are found.
 
-Known native-AGC issues, to be fixed next (#117 Phase 4): raw captures show
-the vendor loop stepping gain within a video line (Phase8 noise lines, dark
-colours shifting towards blue), and occasionally parking at a very low gain.
-In that state Phase8 loses sync and the screen goes white until the gain
-recovers or the receiver restarts. Close-range resolution is also lower than
-with Direct Gain V3 because the native loop targets a smaller Q4 radius.
+**Native hardware AGC** remains selectable (RF page, hold BOOT 2 s through the
+profile cycle, or serial `N`; applied with a reboot) but is not the default.
+Measurements on PR #122 ([native-agc-v2.md](docs/native-agc-v2.md)) show the
+ESP32-C5 packet AGC re-acquiring on a continuous carrier every ~21 us, one to
+two times per video line, landing on a different gain each time (Q4 radius
+41-266 codes for a static VTX). That is the source of the thin black/rainbow
+lines and the grain seen with native AGC; finer IQ lanes, register tuning and
+paced (timer-gated) native tracking did not remove it. A firmware controller
+that holds one gain is the better fit for continuous analog FM.
 
-The combined build was flashed and observed with the VTX on. The operator
-reported a clean picture; USB telemetry showed 98-99% coherence, no clipping,
-and no RX/TX transport errors during that observation. This is a live hardware
-check, not a characterization of every signal level or flight condition. The
-menu and console still label V3 as a test profile because further range and
-transition testing remains useful.
+Bench status: Direct Gain V4 gave a clean picture and very fast response on the
+XIAO ESP32-C5 with the VTX static and moving. Range-edge recovery, near-VTX
+overload and long sessions still need dedicated tests.
 
 ## Demodulator and gain notes
 
 - [Direct Gain V3 design](docs/direct-gain-v3-core.md) describes the Q4
-  observer, gain model, settle logic, and known hardware tuning limits.
+  observer, gain model, settle logic, and known hardware tuning limits that
+  Direct Gain V4 builds on.
+- [Native AGC findings](docs/native-agc-v2.md) (PR #122): per-sample AGC state
+  from the RF dump, the ~21 us re-acquisition cycle, register sweep, DAC
+  self-noise, level-offset and paced-native trials, and why none became the
+  default. [Paced native AGC](docs/native-agc-paced.md) and the
+  [pre-native noise audit](docs/pre-native-noise-audit.md) complete it.
 - [Direct Gain V3 measurement oracle](docs/direct-gain-v3-oracle.md) documents
 the guarded USB measurements and their interpretation.
 - [Range and demod quality](docs/range-demod-quality-v2.md) records the
@@ -152,21 +156,22 @@ The continuous pixel path runs in AHB GDMA, BitScrambler, and PARLIO TX. A backg
 - **The Solution**: C5VRX-3 patches `dw0.suc_eof = 0` across the descriptor ring in SRAM after driver initialization, paired with 64-byte aligned cache synchronization (`sync_dma_c2m`).
 - **The Result**: Truly gapless, infinite circular streaming with zero wrap bubbles, rock-solid vertical sync lock, and crystal-clear horizontal alignment.
 
-### 2. Gain control: native hardware AGC (default), Direct Gain V3 (fallback)
-- By default `rf_start()` never calls `phy_disable_agc()` / `phy_rfagc_disable()`, releases forced gain and FFT scale once, and refuses every firmware gain write. Espressif's AGC owns RF/BB/fine gain.
-- The on-screen menu offers only native AGC (RF FRONTEND page: gain shown as `NATIVE HW AGC`; long press changes bandwidth). The firmware fallback is reachable only from the serial console: `N` stores the choice in NVS and reboots. The fallback below applies only after selecting firmware gain control.
-- The Direct Gain V3 fast observer measures centered Q4 P50/P90/P95, phase coherence, clipping, and origin occupancy from completed RX buffers.
-- V3 is the sole automatic gain writer in the default profile. It chooses physical RF/BB/Fine gain tuples and waits for settled observations after writes.
-- Healthy measurements produce a zero-write hold. A live check with the VTX on showed a clean picture and no clipping or transport errors; broader range and transition testing remains useful.
+### 2. Direct Gain V4 default gain controller
+- The fast observer measures centered Q4 P50/P90/P95, phase coherence, clipping, and origin occupancy from completed RX buffers every 1 ms.
+- V4 is the sole automatic gain writer in the default profile. It chooses physical RF/BB/Fine gain tuples and verifies each write after its measured settle time.
+- Direct: the first window with P50 below 13 or above 32 triggers the full predicted correction in one step; saturation takes an immediate emergency drop.
+- Healthy measurements (P50 13-32) produce a zero-write hold, so a steady carrier gets no gain writes.
+- Without a carrier it listens at the table maximum rather than the G62 survival gain, so a quantizer-starved weak carrier is not mistaken for no carrier.
+- Native hardware AGC is an opt-in alternative (see above).
 
 ### 3. Default RF settings
-- The default Direct Gain V3 profile uses BW40 and AFC off. This keeps gain as the changing RF control during normal operation.
+- The default Direct Gain V4 profile uses BW40 and AFC off. This keeps gain as the changing RF control during normal operation.
 - Other receiver profiles and lab modes remain selectable over the serial console. Some experimental profiles can use automatic bandwidth or AFC while acquiring a carrier.
 
 ### 4. Phase8 adjacent demodulator
 - `fm_phase8_hr_live.bsasm` uses adjacent I/Q samples at 20 MS/s and maps the full signed phase-delta range (-128 through +127 bins) across the 64 DAC levels.
 - The mapping preserves direction across the signed range. A phase step that crosses the +/-180 degree representation boundary remains ambiguous and can alias.
-- Phase8 is selected by default in the current build and was viewed live with Direct Gain V3.
+- Phase8 is selected by default in the current build and was viewed live with Direct Gain V4.
 
 ### Known limits
 - A signed adjacent-phase estimate cannot distinguish an actual step beyond 180 degrees from its wrapped equivalent.
@@ -211,9 +216,9 @@ Connecting to the USB serial console (115200 baud) provides live telemetry and s
 | `e` | Toggle RX sample clock edge (POS / NEG) |
 | `d` | Print the live diagnostics summary and available console commands |
 | `R` | Run the guarded RSSI and centered-Q4 measurement probe |
-| `D` / `I` / `Y` | Select Direct Gain V3 / Direct Gain V1 / ARC V3 profiles (firmware gain mode only) |
-| `N` | Reboot switching between native hardware AGC (default) and firmware gain control |
-| `E` | Print one `P8ENV` Q4 envelope / origin-collapse row |
+| `D` / `I` / `Y` | Select Direct Gain V4 / Direct Gain V1 / ARC V3 profiles |
+| `N` | Toggle native hardware AGC (opt-in) / Direct Gain V4 and reboot |
+| `E` | Print one P8ENV row (Q4 envelope, native AGC state, transport) |
 | `Q` / `T` | Raw Q4/I4 dump (4 x 64 consecutive samples) / read-only AGC register dump |
 
 ---

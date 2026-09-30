@@ -40,11 +40,10 @@
 /* Runtime analog filter state; startup remains BW40. */
 static bool s_analog_bw40 = true;
 
-/* Issue #117/#119 native hardware AGC, the default receive gain owner.
+/* Native hardware AGC: opt-in (Direct Gain V4 is the default gain owner).
  * Decided once per boot from NVS before PHY init: the vendor AGC cannot be
  * restored after phy_disable_agc()/phy_rfagc_disable(), so it is never
- * disabled instead. An explicit NVS value of 0 selects the firmware gain
- * controllers (Direct Gain V3 et al.) as a fallback. */
+ * disabled instead. Only an explicit NVS value of 1 selects native AGC. */
 #define NATIVE_AGC_NVS_NAMESPACE "c5vrx"
 #define NATIVE_AGC_NVS_KEY       "native_agc"
 #define RX_AGC_CTRL_REG          0x600A7030u
@@ -325,12 +324,12 @@ esp_err_t rf_prepare_fresh_phy_calibration(void)
 static bool native_agc_boot_requested(void)
 {
     nvs_handle_t handle;
-    uint8_t value = 1u;
+    uint8_t value = 0;
     if (nvs_open(NATIVE_AGC_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
-        return true;
-    if (nvs_get_u8(handle, NATIVE_AGC_NVS_KEY, &value) != ESP_OK) value = 1u;
+        return false;
+    if (nvs_get_u8(handle, NATIVE_AGC_NVS_KEY, &value) != ESP_OK) value = 0;
     nvs_close(handle);
-    return value != 0u;
+    return value == 1u;
 }
 
 esp_err_t rf_request_native_agc_boot(bool enable)

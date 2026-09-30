@@ -9,6 +9,17 @@ static uint8_t s_power[256];
 static uint8_t s_flags[256];
 static bool s_lut_ready;
 
+/* Direct Gain V4 = this Direct Gain V3 core plus the full-range no-carrier
+ * target and the direct mode below (menu name "DIRECT GAIN V4").
+ *
+ * Direct mode: act on the first window outside the healthy band and jump
+ * straight to the predicted destination. The healthy band stays a strict
+ * zero-write zone and the per-transition hysteresis is unchanged, so a
+ * steady carrier still gets no gain writes (no per-line pumping). */
+#define DG3_STABLE_WINDOWS 1u   /* was 3 */
+#define DG3_HIGH_WINDOWS   1u   /* was 2 */
+#define DG3_WEAK_WINDOWS   1u   /* was 4 */
+
 static int clamp_i(int value, int low, int high)
 {
     return value < low ? low : value > high ? high : value;
@@ -370,12 +381,20 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
     bool no_carrier = o->p50 <= 4 && o->origin_pm >= 650 && o->coherence < 20;
     bool saturated = o->clip_pm >= 100 || o->p95 >= 95;
     if (no_carrier) {
+        /* No usable carrier: listen at the table's maximum gain, not at the
+         * survival gain (first index of the highest RF stage, G62). A weak
+         * carrier is quantizer-starved at G62 and reads as no carrier, so the
+         * old target was a trap that never explored G63..max (pre-q4-lab.md
+         * far sweep; walk test 2026-09-29, where native AGC reached further).
+         * Without a carrier the maximum still reads P50 1-3 / origin ~90 %,
+         * so this state is stable; a strong carrier appearing here takes the
+         * saturation path below on the next window. */
         v3->state = DG3_ACQUIRE;
         v3->stable_windows = 0;
         v3->high_windows = v3->weak_windows = 0;
         v3->virtual_gain_q8 = 0;
         v3->last_direction = 0;
-        return start_write(v3, o, &prior, v3->survival_gain);
+        return start_write(v3, o, &prior, v3->table.max_index);
     }
     if (v3->state == DG3_SETTLE) {
         /* The freshness guard grows from prior settle measurements. The
@@ -390,10 +409,10 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
             abs_i((int)o->p95 - (int)v3->previous.p95) <= 4 &&
             abs_i((int)o->origin_pm - (int)v3->previous.origin_pm) <= 60 &&
             abs_i((int)o->coherence - (int)v3->previous.coherence) <= 12) {
-            if (v3->stable_windows < 3u) ++v3->stable_windows;
+            if (v3->stable_windows < DG3_STABLE_WINDOWS) ++v3->stable_windows;
         } else v3->stable_windows = 1u;
         v3->previous = *o;
-        if (v3->stable_windows < 3u) return v3->current_gain;
+        if (v3->stable_windows < DG3_STABLE_WINDOWS) return v3->current_gain;
         uint64_t elapsed = o->observed_us - v3->write_us;
         if (elapsed < 65535u) {
             uint16_t *settle = &v3->settle_us[v3->transition];
@@ -435,13 +454,11 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
         ++v3->holds;
         return v3->current_gain;
     }
-    if (v3->state == DG3_VERIFY && v3->corrections >= 1u) {
-        v3->state = DG3_ACQUIRE;
-        return v3->current_gain;
-    }
-    bool high = o->p50 >= 35 || o->p90 >= 53 || o->p95 > 72 ||
+    /* Act as soon as the envelope leaves the healthy band (13..32), before
+     * it reaches the grainy/collapsing region, not after noise appeared. */
+    bool high = o->p50 > 32 || o->p90 >= 53 || o->p95 > 72 ||
                 o->clip_pm >= 20;
-    bool weak = o->p50 <= 11 && carrier(o);
+    bool weak = o->p50 < 13 && carrier(o);
     /* Schmitt bands retain the previous direction through small envelope
      * fluctuations; they release only after crossing the inner boundary. */
     if (v3->last_direction == 2 &&
@@ -461,33 +478,18 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
         return v3->current_gain;
     }
     if (v3->state != DG3_VERIFY &&
-        ((high && v3->high_windows < 2u) ||
-         (weak && v3->weak_windows < 4u))) return v3->current_gain;
+        ((high && v3->high_windows < DG3_HIGH_WINDOWS) ||
+         (weak && v3->weak_windows < DG3_WEAK_WINDOWS))) return v3->current_gain;
     int target_power = weak ? 17 : 27;
     int error_q8 = power_db_q8((unsigned)target_power) -
                    power_db_q8(o->p50);
-    if (abs_i(error_q8) >= 3 * 256) {
-        /* Predictive path: one large, unsaturated signal change can request
-         * its full relative correction immediately. */
-        v3->virtual_gain_q8 = error_q8;
-    } else if (weak) {
-        /* Release toward more gain slowly to avoid following fading noise. */
-        v3->virtual_gain_q8 += error_q8 / 4;
-    } else {
-        /* Overload attack is faster than gain-up, while saturation already
-         * takes the immediate emergency path above. */
-        v3->virtual_gain_q8 += error_q8 * 3 / 4;
-    }
+    /* Direct: request the full relative correction in one step, both ways. */
+    v3->virtual_gain_q8 = error_q8;
     v3->virtual_gain_q8 = clamp_i(v3->virtual_gain_q8,
                                   -12 * 256, 12 * 256);
     uint8_t target = select_destination(v3, o, weak,
                                         v3->virtual_gain_q8);
     if (target == v3->current_gain) return target;
-    if (v3->state == DG3_VERIFY &&
-        transition_kind(v3, v3->current_gain, target) != DG3_FINE) {
-        v3->state = DG3_ACQUIRE;
-        return v3->current_gain;
-    }
     if (v3->state == DG3_VERIFY) ++v3->corrections;
     v3->high_windows = v3->weak_windows = 0;
     return start_write(v3, o, &prior, target);

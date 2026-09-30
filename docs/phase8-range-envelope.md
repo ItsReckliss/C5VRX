@@ -1,9 +1,11 @@
 # Phase8 range: Q4 origin collapse and native AGC (issue #119)
 
-Status: **native hardware AGC is the default gain owner** after an operator
-walk test. Direct Gain V3 remains the firmware fallback (`N`). The live
-demodulator is unchanged. The controlled attenuation sweep from the issue is
-still open.
+Status (2026-09-30): **superseded -- Direct Gain V4 is the default gain
+owner.** Native hardware AGC was the default after the walk test below; later
+per-sample measurements (docs/native-agc-v2.md) showed it re-acquiring every
+~21 us on a different gain, and the walk-test advantage came from Direct Gain
+V3 parking at G62 without a carrier, which V4 fixes. Native AGC is opt-in
+(`N` / RF page). The walk-test and bench-session findings below remain valid.
 
 ## Walk test, 2026-09-29 (Phase8 build, A1 5865 MHz, one VTX)
 
@@ -95,16 +97,15 @@ central-cell move counts as a hard step.
 |---|---|
 | `main/phase8_envelope.h` | Read-only statistics over completed Q4/I4 bytes. Includes central-cell (4 cell) occupancy, DG3-compatible origin (power <= 4), clip, P50/P90/P95 (DG3 power units), radius histogram (whole cells 0..10), \|Phase8 delta\| histogram (16-code bins), hard tail (\|delta\| >= 60 codes), hard rate given a central endpoint vs given two outer endpoints, and a provisional annulus class. |
 | Console `E` | Copies up to 32 completed-descriptor probes (128 x 64 adjacent samples) from the console task and prints one `P8ENV` row. It runs only on demand: no periodic task, no PHY write, no gain decision. |
-| Console `N` | Switches between native hardware AGC (default) and firmware gain control for the next boot (NVS key `c5vrx/native_agc`) and reboots. |
+| Console `N` | Switches between Direct Gain V4 (default) and opt-in native hardware AGC for the next boot (NVS key `c5vrx/native_agc`, 1 = native) and reboots. |
 | `tools/p8env_sweep.py` | `capture` runs an interactive attenuation sweep (label a step, it sends `E` N times). `analyze` prints per-step medians, Spearman(central_pm, hard_pm), central/outer hard lift, first video-loss step, the empirical annulus, native gain-register movement and transport-fault movement. |
 
 ## Native AGC (default) and firmware fallback
 
 The vendor AGC cannot be restored after `phy_disable_agc()` /
 `phy_rfagc_disable()` (#117), so the gain owner is chosen per boot in
-`rf_start()` before the PHY is used. NVS `c5vrx/native_agc` missing or 1 means
-native. An explicit 0, written by `N`, selects firmware gain control. In
-native mode:
+`rf_start()` before the PHY is used. Only NVS `c5vrx/native_agc` = 1 selects
+native; missing or 0 means Direct Gain V4. In native mode:
 
 - `phy_disable_agc()` / `phy_rfagc_disable()` are never called, not at boot
   and not on channel change.
