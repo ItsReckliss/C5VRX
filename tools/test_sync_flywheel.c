@@ -29,7 +29,7 @@ static const uint8_t *ph = c5vrx_phase8_gain_lut;
 /* Levels as Phase8 bins per 50 ns endpoint step. Phase8 FULL maps +-128
  * bins; Golden/HC map about -27..+57, so the HC case uses a signal inside
  * Golden's window (as a real VTX did in the Golden era). */
-typedef struct { int sync, blank, white; } levels_t;
+typedef struct { int sync, blank, white, jitter; } levels_t;
 
 /* Deep fade: whole lines are noise, vertical sync included (~1.9 fields). */
 static bool full_fade(unsigned line)
@@ -72,6 +72,8 @@ static void run_case(bool hc, const levels_t *lv)
             m = (uint8_t)rand();
         } else {
             int d = desired_bins(lv, line, x);
+            if (lv->jitter)
+                d += rand() % (2 * lv->jitter + 1) - lv->jitter;
             m = cell_for[(phase + d / 2) & 255];
             e = cell_for[(phase + d) & 255];
         }
@@ -190,11 +192,15 @@ int main(void)
         }
     }
     /* Phase8: sync code 12, blank 22 (bins = 4 * code - 126). */
-    const levels_t phase8 = { 4 * 12 - 126, 4 * 22 - 126, 4 * 50 - 126 };
+    const levels_t phase8 = { 4 * 12 - 126, 4 * 22 - 126, 4 * 50 - 126, 0 };
     /* HC/Golden window: sync -20 bins, blank 0, white +50. */
-    const levels_t golden = { -20, 0, 50 };
+    const levels_t golden = { -20, 0, 50, 0 };
+    /* Hardware (this VTX on Phase8 FULL): sync ~24.5, blanking ~29 codes,
+     * i.e. only ~18 bins deep, with per-sample noise of +-1..2 codes. */
+    const levels_t shallow = { 4 * 24 - 126, 4 * 29 - 126, 4 * 38 - 126, 6 };
     run_case(false, &phase8);
     run_case(true, &golden);
+    run_case(false, &shallow);
     puts("sync flywheel: OK");
     return 0;
 }

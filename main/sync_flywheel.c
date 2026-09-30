@@ -16,7 +16,7 @@
 #define SFW_WIN_LOCKED      16
 #define SFW_WIN_UNLOCKED    40
 #define SFW_CLEAN_ERR       3
-#define SFW_BURST_FROM      100
+#define SFW_BURST_FROM      102   /* burst starts at 106 (NTSC) / 112 (PAL) */
 #define SFW_BURST_TO        170
 #define SFW_SYNC_LEVEL_FROM 15
 #define SFW_SYNC_LEVEL_TO   75
@@ -102,6 +102,22 @@ static void cur_open(const sfw_ring_t *r, uint64_t from)
 /* Hot path: batch-fill codes with 32-bit ring indices in a tight loop
  * (the per-code 64-bit/function-call path cost ~0.5 us per code on the C5,
  * about 20x too slow for tracking at 15.6k lines/s). */
+static void cur_fill(uint32_t upto);
+static inline uint8_t code_at(const sfw_ring_t *r, uint64_t k);
+
+/* Low test on a 4-code mean. Hardware: this VTX puts sync only ~4.5 Phase8
+ * codes below blanking with +-1..2 codes of per-sample noise, so a
+ * per-sample threshold misfires; the mean halves the noise. */
+static inline bool low_at(const sync_flywheel_t *f, const sfw_ring_t *r,
+                          uint64_t k)
+{
+    /* Centred (k-1..k+2): the mean crosses the threshold within ~1 sample
+     * of the true edge. */
+    unsigned sum = code_at(r, k - 1u) + code_at(r, k) +
+                   code_at(r, k + 1u) + code_at(r, k + 2u);
+    return sum <= 4u * f->thr + 2u;
+}
+
 static SFW_HOT void cur_fill(uint32_t upto)
 {
     const sfw_ring_t *r = s_cur.r;
@@ -268,7 +284,7 @@ static void acquire(sync_flywheel_t *f, const sfw_ring_t *r,
     uint64_t starts[8];
     unsigned count = 0, run = 0;
     for (uint64_t k = f->scan_pos; k < end; ++k) {
-        if (code_at(r, k) <= f->thr) { ++run; continue; }
+        if (low_at(f, r, k)) { ++run; continue; }
         if (run >= 80u && run <= 110u && count < 8u) starts[count++] = k - run;
         run = 0;
     }
@@ -307,7 +323,7 @@ static unsigned pulse_width(const sync_flywheel_t *f, const sfw_ring_t *r,
 {
     unsigned width = 0, highs = 0, total = 0;
     while (width < 600u && highs < 3u) {
-        if (code_at(r, start + width) <= f->thr) highs = 0;
+        if (low_at(f, r, start + width)) highs = 0;
         else { ++highs; ++total; }
         ++width;
     }
@@ -371,9 +387,9 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
         uint64_t start = pred;
         for (int e = -win; e <= win && !have; ++e) {
             uint64_t k = pred + (uint64_t)(int64_t)e;
-            if (code_at(r, k - 1u) <= f->thr) continue;
+            if (low_at(f, r, k - 1u)) continue;
             unsigned run = 0;
-            while (run < SFW_MIN_RUN && code_at(r, k + run) <= f->thr) ++run;
+            while (run < SFW_MIN_RUN && low_at(f, r, k + run)) ++run;
             if (run < SFW_MIN_RUN) continue;
             unsigned inside = 0;
             unsigned w = pulse_width(f, r, k, &inside);
@@ -389,7 +405,7 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
             for (int e = 0; e <= win && !have; e = e > 0 ? -e : 1 - e) {
                 uint64_t k = pred + (uint64_t)(int64_t)e;
                 unsigned run = 0;
-                while (run < SFW_MIN_RUN && code_at(r, k + run) <= f->thr) ++run;
+                while (run < SFW_MIN_RUN && low_at(f, r, k + run)) ++run;
                 if (run < SFW_MIN_RUN) continue;
                 unsigned inside = 0;
                 unsigned w = pulse_width(f, r, k, &inside);
@@ -472,6 +488,8 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
         }
 
         bool levels = f->sync_q4 && f->blank_q4 > f->sync_q4 + 32u;
+        if (levels)   /* midpoint of learned sync and blanking levels */
+            f->thr = (uint8_t)((f->sync_q4 + f->blank_q4) / 32u);
         /* Only missing or malformed pulses are rewritten. A real pulse
          * that merely sits off the prediction (e.g. after coasting) is
          * left alone; it steers the PLL back instead. */

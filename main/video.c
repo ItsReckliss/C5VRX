@@ -298,7 +298,7 @@ static volatile bool s_sfw_enabled = true, s_sfw_colour_kill = true;
 /* History-conditioned demodulator (fm_hc.bsasm), chosen per boot from NVS
  * c5vrx/hc_demod = 1 ('P' toggles and reboots). Default Phase8 FULL. */
 static bool s_hc_demod;
-static volatile uint32_t s_sfw_rebases, s_sfw_max_us, s_sfw_last_us;
+static volatile uint32_t s_sfw_rebases, s_sfw_max_us, s_sfw_last_us, s_sfw_sync_us;
 #endif
 static TaskHandle_t s_v3_sentinel_task_handle;
 static esp_timer_handle_t s_v3_sentinel_timer;
@@ -1738,8 +1738,10 @@ static void sync_flywheel_task(void *arg)
             if (now - last_acq_us < 5000) continue;
             last_acq_us = now;
         }
-        int64_t t0 = esp_timer_get_time();   /* includes cache sync */
+        int64_t ts = esp_timer_get_time();
         sync_dma_m2c(s_raw_ring, RAW_RING_BYTES);
+        int64_t t0 = esp_timer_get_time();
+        s_sfw_sync_us = (uint32_t)(t0 - ts);
         uint32_t repaired = s_sfw.repaired;
         bool kill = s_sfw.colour_kill;
         (void)sfw_run(&s_sfw, &ring, rx_abs, floor, true, s_sfw_colour_kill,
@@ -2177,7 +2179,7 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
     printf("SFW enabled=%u locked=%u std=%d state=%u lines=%lu clean=%lu "
            "repaired=%lu missed=%lu vsyncs=%lu acq=%lu thr=%u sync_q4=%u "
            "blank_q4=%u period_q8=%ld colour_kill=%u kill_events=%lu "
-           "floor_skips=%lu rebases=%lu run_us=%lu run_max_us=%lu\n",
+           "floor_skips=%lu rebases=%lu run_us=%lu run_max_us=%lu sync_us=%lu\n",
            s_sfw_enabled ? 1u : 0u, sfw_locked(&s_sfw) ? 1u : 0u,
            sfw_standard(&s_sfw), (unsigned)s_sfw.state,
            (unsigned long)s_sfw.lines, (unsigned long)s_sfw.clean,
@@ -2186,7 +2188,8 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            s_sfw.thr, s_sfw.sync_q4, s_sfw.blank_q4, (long)s_sfw.period_q8,
            s_sfw.colour_kill ? 1u : 0u, (unsigned long)s_sfw.kill_on_events,
            (unsigned long)s_sfw.skipped_floor, (unsigned long)s_sfw_rebases,
-           (unsigned long)s_sfw_last_us, (unsigned long)s_sfw_max_us);
+           (unsigned long)s_sfw_last_us, (unsigned long)s_sfw_max_us,
+           (unsigned long)s_sfw_sync_us);
 #endif
 }
 
