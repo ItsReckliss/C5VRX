@@ -42,7 +42,6 @@
 #include "direct_gain.h"
 #include "direct_gain_v2.h"
 #include "direct_gain_v3.h"
-#include "sync_flywheel.h"
 #include "phase8_gain_lut.h"
 #include "fm_hc_lut.h"
 #include "phase8_envelope.h"
@@ -288,23 +287,9 @@ static volatile uint32_t s_v3_bw_switches;
 static volatile int s_v3_clip_pm, s_v3_coherence;
 static TaskHandle_t s_v3_observer_task_handle;
 #if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
-/* Sync flywheel (sync_flywheel.c): 'B' toggles repair, 'M' the colour
- * killer. Both default on; clean lines are never modified. */
-static sync_flywheel_t s_sfw;
-static TaskHandle_t s_sfw_task_handle;
-/* Off by default until it is fast enough on the chip: measured ~0.5 us
- * per code, so at a 25 % CPU share it analyses only ~1 line in 6 (and an
- * earlier minimum budget starved IDLE -> task watchdog). 'B' / 'M' enable
- * it for experiments; the pacing keeps it within SFW_TARGET_US per wake. */
-static volatile bool s_sfw_enabled = false, s_sfw_colour_kill = false;
 /* History-conditioned demodulator (fm_hc.bsasm), chosen per boot from NVS
  * c5vrx/hc_demod = 1 ('P' toggles and reboots). Default Phase8 FULL. */
 static bool s_hc_demod;
-static volatile uint32_t s_sfw_rebases, s_sfw_max_us, s_sfw_last_us, s_sfw_sync_us;
-/* Self-pacing: the flywheel gets SFW_TARGET_US of every 200 us wake and
- * learns its own cost per code on the chip to turn that into a budget. */
-#define SFW_TARGET_US 50u
-static volatile uint32_t s_sfw_budget = 1024u, s_sfw_ns_per_code = 300u;
 #endif
 static TaskHandle_t s_v3_sentinel_task_handle;
 static esp_timer_handle_t s_v3_sentinel_timer;
@@ -1574,10 +1559,6 @@ static void direct_gain_v3_sentinel_timer_cb(void *arg)
      * RTOS tick; a new RX descriptor completes every ~102 us. */
     if (s_v3_observer_task_handle)
         xTaskNotifyGive(s_v3_observer_task_handle);
-#if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
-    if (s_sfw_task_handle)
-        xTaskNotifyGive(s_sfw_task_handle);
-#endif
 }
 
 static void direct_gain_v3_sentinel_task(void *arg)
@@ -1684,89 +1665,6 @@ static void direct_gain_v5_bw_gear(const dg3_observation_t *o)
     ++s_v3_bw_switches;
     ++s_gain_transition_count;
 }
-
-#if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
-/* Sync flywheel task, 200 us cadence. RX writes the ring and TX (Phase8)
- * reads it ~409 us later; the flywheel analyses completed data and rewrites
- * broken H-sync pulses only in pairs ahead of the TX descriptor in flight.
- * Absolute pair positions are kept across ring wraps with the timer as a
- * wrap disambiguator (20 pairs per us). */
-static void sync_flywheel_task(void *arg)
-{
-    (void)arg;
-    const uint32_t ring_pairs = RAW_RING_BYTES / 2u;
-    const sfw_ring_t ring = { s_raw_ring, ring_pairs, c5vrx_phase8_gain_lut,
-                              s_hc_demod ? c5vrx_hc_decoder : NULL,
-                              s_hc_demod ? c5vrx_hc_pair_code : NULL };
-    uint64_t rx_abs = 0;
-    uint32_t last_rx_off = UINT32_MAX;
-    int64_t last_us = 0;
-    sfw_init(&s_sfw);
-    for (;;) {
-        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        bool active = s_sfw_enabled && !s_menu_active &&
-                      s_output_mode == VIDEO_OUTPUT_6BIT_40 &&
-                      s_rx_dma_ch >= 0 && s_rx_dma_ch < 3 &&
-                      s_tx_dma_ch >= 0 && s_tx_dma_ch < 3 &&
-                      s_rx_dscr_count >= 2 && s_tx_dscr_count >= 2;
-        if (!active) { last_rx_off = UINT32_MAX; continue; }
-        int ri = find_dscr_index(s_rx_dscr_nodes, s_rx_dscr_count,
-                                 AHB_DMA.channel[s_rx_dma_ch].in.in_dscr_bf0.val);
-        int ti = find_dscr_index(s_tx_dscr_nodes, s_tx_dscr_count,
-                                 AHB_DMA.channel[s_tx_dma_ch].out.out_dscr_bf0.val);
-        if (ri < 0 || ti < 0) continue;
-        uint8_t *rx_buf = s_rx_dscr_nodes[ri].buffer;
-        uint8_t *tx_buf = s_tx_dscr_nodes[ti].buffer;
-        if (rx_buf < s_raw_ring || rx_buf >= s_raw_ring + RAW_RING_BYTES ||
-            tx_buf < s_raw_ring || tx_buf >= s_raw_ring + RAW_RING_BYTES) continue;
-        uint32_t rx_off = (uint32_t)(rx_buf - s_raw_ring);
-        uint32_t tx_off = (uint32_t)(tx_buf - s_raw_ring);
-        int64_t now = esp_timer_get_time();
-        if (last_rx_off == UINT32_MAX) {
-            sfw_init(&s_sfw);
-            rx_abs = (uint64_t)ring_pairs * 4u + rx_off / 2u;
-            ++s_sfw_rebases;
-        } else {
-            uint64_t d = ((rx_off - last_rx_off) & (RAW_RING_BYTES - 1u)) / 2u;
-            uint64_t expected = (uint64_t)(now - last_us) * 20u;
-            while (d + ring_pairs / 2u < expected) d += ring_pairs;
-            rx_abs += d;
-        }
-        last_rx_off = rx_off;
-        last_us = now;
-        uint64_t lag = ((rx_off - tx_off) & (RAW_RING_BYTES - 1u)) / 2u;
-        uint64_t floor = rx_abs - lag + s_tx_dscr_nodes[ti].length / 2u + 128u;
-        int64_t ts = esp_timer_get_time();
-        sync_dma_m2c(s_raw_ring, RAW_RING_BYTES);
-        int64_t t0 = esp_timer_get_time();
-        s_sfw_sync_us = (uint32_t)(t0 - ts);
-        uint32_t repaired = s_sfw.repaired;
-        bool kill = s_sfw.colour_kill;
-        (void)sfw_run(&s_sfw, &ring, rx_abs, floor, true, s_sfw_colour_kill,
-                      s_sfw_budget);
-        uint32_t spent = (uint32_t)(esp_timer_get_time() - t0);
-        s_sfw_last_us = spent;
-        if (spent > s_sfw_max_us) s_sfw_max_us = spent;
-        /* Learn ns per code (EMA) and size the next budget to the target. */
-        if (s_sfw.codes_used >= 128u) {
-            uint32_t ns = spent * 1000u / s_sfw.codes_used;
-            s_sfw_ns_per_code = (7u * s_sfw_ns_per_code + ns) / 8u;
-            if (!s_sfw_ns_per_code) s_sfw_ns_per_code = 1u;
-        }
-        uint32_t budget = SFW_TARGET_US * 1000u / s_sfw_ns_per_code;
-        /* Never exceed the time target: a low floor only guarantees
-         * progress (the old 256-code floor forced ~130 us per 200 us). */
-        s_sfw_budget = budget < 32u ? 32u : budget > 20000u ? 20000u : budget;
-        if (s_sfw.repaired != repaired || kill || s_sfw.colour_kill)
-            sync_dma_c2m(s_raw_ring, RAW_RING_BYTES);
-        int std = sfw_standard(&s_sfw);
-        if (sfw_locked(&s_sfw) && std) {
-            s_detected_video_std = std == 1 ? VIDEO_STD_PAL : VIDEO_STD_NTSC;
-            s_detected_video_std_valid = true;
-        }
-    }
-}
-#endif
 
 /* Observe four separated 64-byte regions in the latest completed descriptor.
  * This task never touches a descriptor still owned by the RX DMA engine and
@@ -2182,25 +2080,6 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            s_direct_gain_v3.settle_us[DG3_FINE],
            s_direct_gain_v3.settle_us[DG3_BB],
            s_direct_gain_v3.settle_us[DG3_RF]);
-#endif
-#if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
-    printf("SFW enabled=%u locked=%u std=%d state=%u lines=%lu clean=%lu "
-           "repaired=%lu missed=%lu vsyncs=%lu acq=%lu thr=%u sync_q4=%u "
-           "blank_q4=%u period_q8=%ld colour_kill=%u kill_events=%lu "
-           "floor_skips=%lu rebases=%lu run_us=%lu run_max_us=%lu sync_us=%lu "
-           "budget=%lu ns_per_code=%lu codes=%lu skipped=%lu fast=%lu\n",
-           s_sfw_enabled ? 1u : 0u, sfw_locked(&s_sfw) ? 1u : 0u,
-           sfw_standard(&s_sfw), (unsigned)s_sfw.state,
-           (unsigned long)s_sfw.lines, (unsigned long)s_sfw.clean,
-           (unsigned long)s_sfw.repaired, (unsigned long)s_sfw.missed,
-           (unsigned long)s_sfw.vsyncs, (unsigned long)s_sfw.acquisitions,
-           s_sfw.thr, s_sfw.sync_q4, s_sfw.blank_q4, (long)s_sfw.period_q8,
-           s_sfw.colour_kill ? 1u : 0u, (unsigned long)s_sfw.kill_on_events,
-           (unsigned long)s_sfw.skipped_floor, (unsigned long)s_sfw_rebases,
-           (unsigned long)s_sfw_last_us, (unsigned long)s_sfw_max_us,
-           (unsigned long)s_sfw_sync_us, (unsigned long)s_sfw_budget,
-           (unsigned long)s_sfw_ns_per_code, (unsigned long)s_sfw.codes_used,
-           (unsigned long)s_sfw.skipped_lines, (unsigned long)s_sfw.fast_lines);
 #endif
 }
 
@@ -5383,10 +5262,6 @@ static void console_diag_task(void *arg)
                 } else if (c == 'R') {
                     lab_run_rssi_gain_probe();
 #if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
-                } else if (c == 'B') {
-                    s_sfw_enabled = !s_sfw_enabled;
-                    printf("[SFW] sync flywheel repair %s\n",
-                           s_sfw_enabled ? "ON" : "OFF");
                 } else if (c == 'P') {
                     nvs_handle_t h;
                     esp_err_t err = nvs_open("c5vrx", NVS_READWRITE, &h);
@@ -5403,10 +5278,6 @@ static void console_diag_task(void *arg)
                         vTaskDelay(pdMS_TO_TICKS(150));
                         esp_restart();
                     }
-                } else if (c == 'M') {
-                    s_sfw_colour_kill = !s_sfw_colour_kill;
-                    printf("[SFW] colour killer %s\n",
-                           s_sfw_colour_kill ? "ON" : "OFF");
 #endif
                 } else if (c == 'D') {
                     apply_rx_profile(RX_PROFILE_DIRECT_GAIN);
@@ -5865,11 +5736,6 @@ esp_err_t video_start(void)
     };
     ESP_ERROR_CHECK(esp_timer_create(&v3_timer_args,
                                      &s_v3_sentinel_timer));
-#if CONFIG_C5VRX_PHASE8_HR_LIVE_TEST
-    ESP_ERROR_CHECK(xTaskCreate(sync_flywheel_task, "sync_fw", 3072, NULL, 5,
-                                &s_sfw_task_handle) == pdPASS ?
-                    ESP_OK : ESP_ERR_NO_MEM);
-#endif
     ESP_ERROR_CHECK(esp_timer_start_periodic(s_v3_sentinel_timer, 200));
 #endif
 

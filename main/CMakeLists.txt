@@ -14,7 +14,6 @@ idf_component_register(
         "direct_gain.c"
         "direct_gain_v2.c"
         "direct_gain_v3.c"
-        "sync_flywheel.c"
         "menu_raster.c"
     INCLUDE_DIRS "."
     REQUIRES
@@ -38,10 +37,6 @@ idf_component_register(
 )
 
 # Proven default plus opt-in experimental demod/output paths.
-# The sync flywheel mirrors the demodulator on the CPU under a time budget;
-# it needs real optimisation even in -Og builds.
-set_source_files_properties(sync_flywheel.c PROPERTIES COMPILE_OPTIONS "-O2")
-
 target_bitscrambler_add_src("fm.bsasm")
 target_bitscrambler_add_src("fm_relative_golden.bsasm")
 target_bitscrambler_add_src("fm_phase5_360.bsasm")

@@ -43,7 +43,7 @@ incoherent carrier for 1 s; back to BW40 after 1 s of clear recovery. BW20
 was rejected as a fixed mode (chroma/detail); at the edge it trades a little
 colour for ~3 dB of CNR, as analog receivers narrow their IF.
 
-### Sync flywheel + colour killer (`sync_flywheel.c`)
+### Sync flywheel + colour killer (parked on `feat/sync-flywheel`)
 The BitScrambler demodulates on the fly from the ring TX reads ~409 us after
 RX writes it. The flywheel mirrors the Phase8 code formula on a small window
 per predicted line, tracks line phase and period with a PLL (phase 1/4,
@@ -56,7 +56,7 @@ never written (vertical interval). Above ~25 % repaired lines (EMA ~65 ms)
 the burst window is written at blank level so the goggle switches to
 monochrome instead of rainbow colour; released below 5 %. The tracked period
 also drives the PAL/NTSC detection. Console: `B` repair, `M` colour killer.
-**Hardware status (2026-09-30): off by default.** On the chip it measured
+**Not in main (2026-09-30):** parked on branch `feat/sync-flywheel`. On the chip it measured
 ~0.5 us per demodulated code even at -O2; at a 25 % CPU share that covers
 only ~1 line in 6, and the first on-by-default builds starved IDLE (task
 watchdog) until it was budgeted. It is self-paced now (learned ns/code,
