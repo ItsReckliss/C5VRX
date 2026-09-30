@@ -65,7 +65,8 @@ typedef struct {
      * noise and cost fold headroom. 0 = not yet measured (no cap). */
     uint16_t noise_p50_q4;
     uint8_t lane_cap;
-    uint64_t lane_us, lane_hold_until_us;
+    uint64_t lane_us, lane_hold_until_us, last_fold_us;
+    uint8_t fold_streak;      /* consecutive fold drops -> longer hold-off */
     uint32_t lane_changes, fold_drops;
 } direct_gain_v3_t;
 

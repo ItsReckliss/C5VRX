@@ -76,7 +76,11 @@ requirements by themselves**.
 - Do not turn a physical SRAM or DMA block boundary into a DSP reset.
 - Do not claim sample-gapless RF or AV transport without its physical proof.
 - The normal live path recovers the transmitted composite waveform; it does not
-  decode pixels or regenerate PAL/NTSC.
+  decode pixels. Exception (operator decision 2026-09-30): the sync flywheel
+  (`main/sync_flywheel.c`) may rewrite missing/malformed H-sync pulses and,
+  as a colour killer, the burst window, by editing raw IQ in the ring before
+  TX reads it. It must never modify a line whose real pulse was detected,
+  never write the vertical interval, and stays switchable (`B`/`M`).
 - Keep USB/debug outside realtime pacing.
 - Do not silently change the tested XIAO D4..D9 DAC pin order or the physical
   8.2k/3.9k/2k/1k/470R/240R plus 200R network.

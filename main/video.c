@@ -292,10 +292,9 @@ static TaskHandle_t s_v3_observer_task_handle;
  * killer. Both default on; clean lines are never modified. */
 static sync_flywheel_t s_sfw;
 static TaskHandle_t s_sfw_task_handle;
-/* Off by default: regenerating sync/blanking burst goes beyond the "recover
- * the transmitted composite waveform" invariant (AGENTS.md) until a
- * hardware A/B justifies changing it. */
-static volatile bool s_sfw_enabled = false, s_sfw_colour_kill = false;
+/* On by default (AGENTS.md exception): only missing/malformed pulses are
+ * rewritten; clean lines and the vertical interval are never touched. */
+static volatile bool s_sfw_enabled = true, s_sfw_colour_kill = true;
 /* History-conditioned demodulator (fm_hc.bsasm), chosen per boot from NVS
  * c5vrx/hc_demod = 1 ('P' toggles and reboots). Default Phase8 FULL. */
 static bool s_hc_demod;

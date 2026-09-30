@@ -19,9 +19,12 @@
 #define SFW_KILL_ON_Q16     (65536u / 4u)    /* >25 % of lines repaired */
 #define SFW_KILL_OFF_Q16    (65536u / 20u)   /* <5 % */
 /* A crystal line clock: with +-1 pair edge noise the 1/64 frequency loop
- * leaves ~0.016 pair/line period error, so coasting 300 lines drifts <~5
- * pairs. Lock needs 32 clean lines since acquisition. */
-#define SFW_COAST_LINES     300u
+ * leaves ~0.016 pair/line period error, so coasting 650 lines drifts ~10
+ * pairs (0.5 us). Lock needs 32 clean lines since acquisition. The field
+ * counter coasts too (up to 50 fields = 1 s), so a fade that also hides the
+ * vertical sync keeps both repair and vertical-interval protection. */
+#define SFW_FIELD_COAST     50u
+#define SFW_COAST_LINES     650u   /* ~2 fields, ~10 pairs worst drift */
 #define SFW_LOCK_CLEAN      32u
 #define SFW_LOST_LINES      1200u
 
@@ -266,6 +269,32 @@ static unsigned mean_code(const sfw_ring_t *r, uint64_t a, uint64_t b)
     return (sum << 4) / (unsigned)(b - a);          /* Q4 */
 }
 
+/* Low-code run length from `start`, tolerating single noisy samples;
+ * `inside` (optional) counts the tolerated high samples within the run. */
+static unsigned pulse_width(const sync_flywheel_t *f, const sfw_ring_t *r,
+                            uint64_t start, unsigned *inside)
+{
+    unsigned width = 0, highs = 0, total = 0;
+    while (width < 600u && highs < 3u) {
+        if (code_at(r, start + width) <= f->thr) highs = 0;
+        else { ++highs; ++total; }
+        ++width;
+    }
+    if (inside) *inside = total - highs;
+    return width - highs;
+}
+
+/* Normal H sync ~94 and broad ~540 pairs with few gaps (a noisy real pulse
+ * still reads mostly low); equalizing ~47 must be nearly solid. Gappy runs
+ * of the same length are noise (HC maps ~half of random cells low). */
+static bool plausible_pulse(unsigned width, unsigned inside)
+{
+    if (width >= 70u && width <= 130u) return inside <= width / 8u;
+    if (width >= 200u) return inside <= width / 8u;
+    if (width >= 40u && width <= 55u) return inside <= 2u;
+    return false;
+}
+
 unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
                  uint64_t write_floor, bool allow_repair, bool allow_colour_kill,
                  uint32_t max_scan)
@@ -290,33 +319,56 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
             break;
         }
         bool locked = sfw_locked(f);
-        int win = locked ? SFW_WIN_LOCKED : SFW_WIN_UNLOCKED;
+        /* The window widens while coasting (drift grows with coasted lines)
+         * so a real pulse is found again and never mistaken for a missing
+         * one after a long fade. */
+        int win = SFW_WIN_UNLOCKED;
+        if (locked) {
+            win = SFW_WIN_LOCKED + (int)(f->lines_since_clean / 25u);
+            if (win > SFW_WIN_UNLOCKED) win = SFW_WIN_UNLOCKED;
+        }
 
         /* Leading edge: first run of SFW_MIN_RUN low codes in the window. */
-        int found = -1;
-        for (int e = -win; e <= win && found < 0; ++e) {
+        /* `found` is the edge offset from the prediction and may be
+         * negative (early pulse); `have` says whether a pulse was found.
+         * First pass: a leading edge (high -> SFW_MIN_RUN lows) that forms a
+         * plausible pulse; implausible noise runs are skipped, not taken. */
+        int found = 0;
+        bool have = false;
+        unsigned width = 0;
+        uint64_t start = pred;
+        for (int e = -win; e <= win && !have; ++e) {
             uint64_t k = pred + (uint64_t)(int64_t)e;
             if (code_at(r, k - 1u) <= f->thr) continue;
             unsigned run = 0;
             while (run < SFW_MIN_RUN && code_at(r, k + run) <= f->thr) ++run;
-            if (run == SFW_MIN_RUN) found = e;
-        }
-        unsigned width = 0;
-        uint64_t start = pred + (uint64_t)(int64_t)(found < 0 ? 0 : found);
-        if (found >= 0) {
-            unsigned highs = 0;
-            while (width < 600u && highs < 3u) {
-                if (code_at(r, start + width) <= f->thr) highs = 0; else ++highs;
-                ++width;
+            if (run < SFW_MIN_RUN) continue;
+            unsigned inside = 0;
+            unsigned w = pulse_width(f, r, k, &inside);
+            if (plausible_pulse(w, inside)) {
+                found = e; have = true; start = k; width = w;
             }
-            width -= highs;
         }
-        /* Normal H sync ~94, equalizing ~47, broad ~540. Only normal and
-         * broad pulses steer the PLL: short low runs also occur in noise
-         * (HC maps ~half of random cells to low codes). */
-        bool normal = found >= 0 && width >= 70u && width <= 130u;
-        bool broad = found >= 0 && width >= 200u;
-        bool equalizing = found >= 0 && width >= 40u && width <= 55u;
+        if (!have) {
+            /* Second pass without the leading-edge test: after a fade the
+             * sample before a real pulse can itself be a low noise code.
+             * Nearest-first from the prediction; only a solid pulse of
+             * H-sync width counts (a real pulse has no gaps). */
+            for (int e = 0; e <= win && !have; e = e > 0 ? -e : 1 - e) {
+                uint64_t k = pred + (uint64_t)(int64_t)e;
+                unsigned run = 0;
+                while (run < SFW_MIN_RUN && code_at(r, k + run) <= f->thr) ++run;
+                if (run < SFW_MIN_RUN) continue;
+                unsigned inside = 0;
+                unsigned w = pulse_width(f, r, k, &inside);
+                if (w >= 88u && w <= 100u && inside <= 2u) {
+                    found = e; have = true; start = k; width = w;
+                }
+            }
+        }
+        bool normal = have && width >= 70u && width <= 130u;
+        bool broad = have && width >= 200u;
+        bool equalizing = have && width >= 40u && width <= 55u;
         bool vertical = broad || equalizing;
         bool clean = normal && (!locked ||
                      (found >= -SFW_CLEAN_ERR && found <= SFW_CLEAN_ERR));
@@ -337,18 +389,33 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
 
         /* Field tracking from runs of broad/equalizing pulses. */
         if (vertical) {
+            /* Accept a V sync where the field counter expects it (after a
+             * coasted wrap it sits near the field start). */
             if (++f->vertical_run == 3u &&
-                (!f->field_valid || f->line_in_field > f->field_lines / 2u)) {
+                (!f->field_valid || f->line_in_field > f->field_lines / 2u ||
+                 f->line_in_field < 12u)) {
                 f->line_in_field = 3u;
                 f->field_valid = true;
+                f->fields_coasted = 0;
                 ++f->vsyncs;
             }
-        } else if (normal) {
+        } else {
+            /* A real vertical interval is a run of consecutive broad /
+             * equalizing lines; anything else ends it (a lone noise run
+             * that looked like an equalizing pulse must not stick). */
             f->vertical_run = 0;
         }
         ++f->line_in_field;
-        if (f->field_valid && f->line_in_field > f->field_lines + 30u)
-            f->field_valid = false;
+        if (f->field_valid) {
+            /* Predicted field end: wrap to the next field's start (same +2
+             * offset a detected V sync gives), alternating the half line. */
+            uint16_t len = (uint16_t)(f->field_lines - (f->field_parity ? 1u : 0u));
+            if (f->line_in_field >= len + 2u) {
+                f->line_in_field = (uint16_t)(f->line_in_field - len);
+                f->field_parity = !f->field_parity;
+                if (++f->fields_coasted > SFW_FIELD_COAST) f->field_valid = false;
+            }
+        }
         bool in_vwin = !f->field_valid || f->vertical_run ||
                        f->line_in_field < 20u ||
                        f->line_in_field + 8u >= f->field_lines;
@@ -368,12 +435,15 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
                 f->blank_q4 = f->blank_q4 ? (uint16_t)((7u * f->blank_q4 + b) / 8u) : (uint16_t)b;
             }
         } else {
-            if (found < 0) ++f->missed;
+            if (!have) ++f->missed;
             if (f->lines_since_clean < 0xFFFFu) ++f->lines_since_clean;
         }
 
         bool levels = f->sync_q4 && f->blank_q4 > f->sync_q4 + 32u;
-        bool repair = !clean && !vertical && locked && allow_repair &&
+        /* Only missing or malformed pulses are rewritten. A real pulse
+         * that merely sits off the prediction (e.g. after coasting) is
+         * left alone; it steers the PLL back instead. */
+        bool repair = !normal && !vertical && locked && allow_repair &&
                       !in_vwin && levels;
         uint64_t line = (base + 128u) >> 8;
         if (repair) {
@@ -389,9 +459,12 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
         } else if (f->colour_kill && f->repair_q16 < SFW_KILL_OFF_Q16) {
             f->colour_kill = false;
         }
+        /* Anchor the burst window on the real pulse when one was found, so
+         * a coasted prediction never overlaps the end of the actual sync. */
+        uint64_t anchor = normal ? start : line;
         if (f->colour_kill && allow_colour_kill && locked && levels && !in_vwin)
-            synth(f, r, line + SFW_BURST_FROM, line + SFW_BURST_TO, write_floor,
-                  (f->blank_q4 + 8u) >> 4);
+            synth(f, r, anchor + SFW_BURST_FROM, anchor + SFW_BURST_TO,
+                  write_floor, (f->blank_q4 + 8u) >> 4);
 
         if (f->lines_since_clean > SFW_LOST_LINES) {
             /* Nothing recognisable for a long time: re-acquire. */

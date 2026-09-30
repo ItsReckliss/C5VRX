@@ -43,6 +43,8 @@ typedef struct {
     uint16_t field_lines;     /* 313 PAL / 263 NTSC (half line rounded up) */
     uint16_t vertical_run;
     bool field_valid;
+    bool field_parity;        /* alternates 313/312 (PAL), 263/262 (NTSC) */
+    uint8_t fields_coasted;   /* fields since the last detected V sync */
     bool colour_kill;
     /* counters */
     uint32_t lines, clean, repaired, missed, vsyncs, skipped_floor, acquisitions;

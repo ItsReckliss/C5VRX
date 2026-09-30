@@ -164,7 +164,7 @@ int main(void)
         uint64_t t = 20000000u;
         direct_gain_v3_reset(&v3, &table, max, 62u);
         /* Disabled by default: a starved envelope changes nothing. */
-        dg3_observation_t starved = obs(2, 3, 400, 0, 30, t);
+        dg3_observation_t starved = obs(2, 2, 400, 0, 30, t);
         assert(direct_gain_v3_tick(&v3, &starved) == max && v3.lane == 0u);
 
         direct_gain_v3_enable_lanes(&v3, 2u);
@@ -207,7 +207,7 @@ int main(void)
          * the analog gain trim the overshoot instead of dropping the lane. */
         direct_gain_v3_reset(&v3, &table, max, 62u);
         direct_gain_v3_enable_lanes(&v3, 2u);
-        dg3_observation_t twelve = obs(12, 20, 0, 0, 95, t += 1000u);
+        dg3_observation_t twelve = obs(10, 11, 0, 0, 95, t += 1000u);
         (void)direct_gain_v3_tick(&v3, &twelve);
         assert(v3.lane == 1u);
         dg3_observation_t over = obs(48, 70, 0, 0, 95, t += 1000u);
@@ -280,6 +280,29 @@ int main(void)
         direct_gain_v3_sync_applied(&v3, down, sat.observed_us);
         dg3_observation_t stale = obs(70, 110, 0, 300, 90, sat.observed_us + 100u);
         assert(direct_gain_v3_tick(&v3, &stale) == down);
+    }
+
+    /* Hardware regression: a weak carrier whose noise tails touch the rail
+     * on a finer lane every ~10th window must not hunt (was ~150 lane
+     * changes/s). One second of 200 us windows. */
+    {
+        uint8_t max = table.max_index;
+        uint64_t t = 70000000u;
+        direct_gain_v3_reset(&v3, &table, max, 62u);
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        uint32_t changes0 = v3.lane_changes;
+        for (unsigned w = 0; w < 5000u; ++w) {
+            unsigned scale = 1u << (2u * v3.lane);
+            unsigned p50 = 1u * scale, p95 = 4u * scale;
+            unsigned clip = (v3.lane && w % 10u < 2u) ? 25u : 0u;
+            dg3_observation_t o = obs((int)(p50 > 113u ? 113u : p50),
+                                      (int)(p95 > 113u ? 113u : p95), 300,
+                                      (int)clip, 60, t += 200u);
+            (void)direct_gain_v3_tick(&v3, &o);
+        }
+        printf("hunting regression: %u lane changes in 1 s, fold_streak %u\n",
+               (unsigned)(v3.lane_changes - changes0), v3.fold_streak);
+        assert(v3.lane_changes - changes0 < 60u);
     }
 
     puts("direct gain v3 core: OK");

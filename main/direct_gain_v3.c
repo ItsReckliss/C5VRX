@@ -46,6 +46,13 @@ static bool s_lut_ready;
  * the loss is already small from ~0.5 step). Q4 fixed point. */
 #define DG3_NOISE_R2_TARGET_Q4 20u
 #define DG3_LANE_HOLD_US    5000u
+/* Hysteresis between entering a lane and its fold guard: a lane is entered
+ * only if the scaled P95 keeps real headroom below the drop thresholds
+ * (rail codes >= 20 permille / P95 > 72). Hardware: a weak carrier entered
+ * at scaled P95 ~60 on ultrafine touched the rail ~150 times/s and hunted.
+ * Each further fold drop within 2 s doubles the hold-off (up to ~1.3 s). */
+#define DG3_LANE_UP_P95     45u
+#define DG3_FOLD_STREAK_US  2000000u
 
 static int clamp_i(int value, int low, int high)
 {
@@ -432,14 +439,14 @@ static uint8_t lane_for(const direct_gain_v3_t *v3,
         int top = (int)v3->lane_cap - (int)v3->lane;
         for (int k = top; k >= 1; --k) {
             unsigned p50 = scale_power(o->p50, k), p95 = scale_power(o->p95, k);
-            if (p50 <= 32u && p95 <= 65u) return (uint8_t)(v3->lane + k);
+            if (p50 <= 32u && p95 <= DG3_LANE_UP_P95) return (uint8_t)(v3->lane + k);
         }
         /* No lane lands inside the (<6 dB wide) band: take the smallest
          * step that reaches it without rail codes; the analog gain then
          * trims the overshoot down in its fine steps. */
         for (int k = 1; k <= top; ++k) {
             unsigned p50 = scale_power(o->p50, k), p95 = scale_power(o->p95, k);
-            if (p50 >= 13u && p95 <= 72u) return (uint8_t)(v3->lane + k);
+            if (p50 >= 13u && p95 <= DG3_LANE_UP_P95) return (uint8_t)(v3->lane + k);
         }
         return v3->lane;
     }
@@ -528,7 +535,12 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
             return v3->current_gain;
         ++v3->fold_drops;
         v3->junk_windows = 0;
-        v3->lane_hold_until_us = o->observed_us + DG3_LANE_HOLD_US;
+        if (o->observed_us - v3->last_fold_us > DG3_FOLD_STREAK_US)
+            v3->fold_streak = 0;
+        v3->lane_hold_until_us = o->observed_us +
+            ((uint64_t)DG3_LANE_HOLD_US << (v3->fold_streak < 8u ? v3->fold_streak : 8u));
+        if (v3->fold_streak < 255u) ++v3->fold_streak;
+        v3->last_fold_us = o->observed_us;
         return set_lane(v3, o, 0u);
     }
     v3->junk_windows = 0;
@@ -635,7 +647,8 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
     if (lane_up_ok && v3->state != DG3_SETTLE &&
         o->p50 < 13 && o->clip_pm < 20 && o->p95 < 53) {
         uint8_t lane = lane_for(v3, o, true);
-        if (lane == v3->lane) lane = (uint8_t)(v3->lane + 1u);
+        /* Nothing lands in band with headroom: stay (no forced step). */
+        if (lane == v3->lane) return v3->current_gain;
         return set_lane(v3, o, lane);
     }
     if (healthy(o)) {

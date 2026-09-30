@@ -56,10 +56,12 @@ never written (vertical interval). Above ~25 % repaired lines (EMA ~65 ms)
 the burst window is written at blank level so the goggle switches to
 monochrome instead of rainbow colour; released below 5 %. The tracked period
 also drives the PAL/NTSC detection. Console: `B` repair, `M` colour killer.
-**Both are off by default:** regenerating sync and blanking the burst go
-beyond the AGENTS.md invariant that the live path recovers the transmitted
-composite waveform and does not regenerate PAL/NTSC. Enable them for A/B; the
-invariant should only change after a hardware comparison justifies it.
+Both are on by default; AGENTS.md has an explicit exception for the
+flywheel (operator decision 2026-09-30). A detected real pulse is never
+rewritten, even when it sits off the prediction after coasting; the search
+window widens with coasted lines (+-16 up to +-40). The field counter coasts
+too (313/312 or 263/262 lines, up to 1 s), so a deep fade that also hides the
+vertical sync keeps both repair and vertical-interval protection.
 
 Host test (`tools/test_sync_flywheel.c`): synthetic PAL CVBS -> FM -> Q4
 cells in the live ring layout with the hardware RX/TX lag, decoded with the

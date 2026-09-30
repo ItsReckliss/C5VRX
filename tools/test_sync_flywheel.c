@@ -19,7 +19,7 @@
 #define FIELD_LINES 312u
 #define CHUNK 2046u
 #define TX_LAG 8192u
-#define TOTAL_LINES 6000u
+#define TOTAL_LINES 10000u
 
 static uint8_t ring[RING_PAIRS * 2u];
 static uint8_t original[TOTAL_LINES * LINE * 2u + 8u];
@@ -30,6 +30,12 @@ static const uint8_t *ph = c5vrx_phase8_gain_lut;
  * bins; Golden/HC map about -27..+57, so the HC case uses a signal inside
  * Golden's window (as a real VTX did in the Golden era). */
 typedef struct { int sync, blank, white; } levels_t;
+
+/* Deep fade: whole lines are noise, vertical sync included (~1.9 fields). */
+static bool full_fade(unsigned line)
+{
+    return line >= 6000u && line < 6600u;
+}
 
 static bool broken_line(unsigned line)
 {
@@ -61,7 +67,7 @@ static void run_case(bool hc, const levels_t *lv)
     for (size_t k = 0; k < pairs; ++k) {
         unsigned line = (unsigned)(k / LINE), x = (unsigned)(k % LINE);
         uint8_t e, m;
-        if (broken_line(line) && x < 120u) {
+        if (full_fade(line) || (broken_line(line) && x < 120u)) {
             e = (uint8_t)rand();
             m = (uint8_t)rand();
         } else {
@@ -82,6 +88,7 @@ static void run_case(bool hc, const levels_t *lv)
     size_t rx = 0, tx = 0;
     unsigned repaired_ok = 0, repaired_bad = 0, clean_touched = 0, vwin_touched = 0;
     int line_sum = 0, line_n = 0;
+    unsigned fade_lines = 0, fade_patched = 0;
     int prev_phase = 0;
     uint8_t prev_state = 0;
     bool locked_seen = false;
@@ -116,8 +123,14 @@ static void run_case(bool hc, const levels_t *lv)
                 if (modified) ++vwin_touched;
                 continue;
             }
-            if (!broken_line(line) && modified && x < 100u) ++clean_touched;
-            if (broken_line(line) && line > 600u && x >= 2u && x < 92u) {
+            bool faded = full_fade(line) && in_field >= 20u &&
+                         in_field + 10u <= FIELD_LINES;
+            if (!broken_line(line) && !full_fade(line) && modified && x < 100u) {
+                ++clean_touched;
+            }
+            if (faded && x == 50u) ++fade_lines;
+            if (faded && x >= 2u && x < 92u && modified) ++fade_patched;
+            if ((broken_line(line) || faded) && line > 600u && x >= 2u && x < 92u) {
                 if (!hc) {
                     if (code >= sync_code - 1 && code <= sync_code + 1) ++repaired_ok;
                     else ++repaired_bad;
@@ -151,6 +164,11 @@ static void run_case(bool hc, const levels_t *lv)
     assert(f.blank_q4 > f.sync_q4 + 32u);
     assert(repaired_ok > 0u && repaired_bad * 50u <= repaired_ok);
     assert(clean_touched == 0u);
+    /* The deep fade hides V sync for ~2 fields: repair and vertical
+     * protection must both continue (field counter coasts). */
+    printf("  deep fade: %u lines in picture region, %u pulse samples patched\n",
+           fade_lines, fade_patched);
+    assert(fade_patched >= fade_lines * 85u);
     assert(vwin_touched == 0u);
     assert(f.kill_on_events >= 1u);
     assert(!f.colour_kill);
