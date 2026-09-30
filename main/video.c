@@ -1738,10 +1738,10 @@ static void sync_flywheel_task(void *arg)
             if (now - last_acq_us < 5000) continue;
             last_acq_us = now;
         }
+        int64_t t0 = esp_timer_get_time();   /* includes cache sync */
         sync_dma_m2c(s_raw_ring, RAW_RING_BYTES);
         uint32_t repaired = s_sfw.repaired;
         bool kill = s_sfw.colour_kill;
-        int64_t t0 = esp_timer_get_time();
         (void)sfw_run(&s_sfw, &ring, rx_abs, floor, true, s_sfw_colour_kill,
                       2800u, 6u);
         uint32_t spent = (uint32_t)(esp_timer_get_time() - t0);

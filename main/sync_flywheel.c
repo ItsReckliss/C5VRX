@@ -2,6 +2,13 @@
 
 #include <string.h>
 
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#define SFW_HOT IRAM_ATTR
+#else
+#define SFW_HOT
+#endif
+
 /* Geometry at 20 MS/s output pairs (ITU-R BT.470): H sync 4.7 us = 94,
  * burst from ~5.3/5.6 us to ~7.8 us (106..157), back porch to >= 9.2 us. */
 #define SFW_SYNC_PAIRS      94
@@ -92,25 +99,49 @@ static void cur_open(const sfw_ring_t *r, uint64_t from)
     }
 }
 
-static uint8_t code_at(const sfw_ring_t *r, uint64_t k)
+/* Hot path: batch-fill codes with 32-bit ring indices in a tight loop
+ * (the per-code 64-bit/function-call path cost ~0.5 us per code on the C5,
+ * about 20x too slow for tracking at 15.6k lines/s). */
+static SFW_HOT void cur_fill(uint32_t upto)
 {
-    if (s_cur.r != r || k < s_cur.base || k >= s_cur.base + CUR_MAX)
-        cur_open(r, k);
-    while (s_cur.base + s_cur.n <= k) {
-        uint64_t j = s_cur.base + s_cur.n;
-        uint8_t c;
-        if (r->hc_dec) {
-            uint8_t prev = s_cur.n ? s_cur.state[s_cur.n - 1u] : s_cur.prev_state;
-            uint8_t st = r->hc_dec[((prev >> 3) << 8) | endpoint(r, j)];
-            c = r->hc_pair[(prev << 5) | st];
-            s_cur.state[s_cur.n] = st;
-        } else {
-            c = (uint8_t)(((128 + r->phase[endpoint(r, j)] -
-                            r->phase[endpoint(r, j - 1u)]) & 255) >> 2);
+    const sfw_ring_t *r = s_cur.r;
+    const uint8_t *ring = r->ring;
+    const uint32_t mask = r->ring_pairs - 1u;
+    uint32_t n = s_cur.n;
+    uint32_t i = ((uint32_t)s_cur.base + n) & mask;
+    if (r->hc_dec) {
+        const uint8_t *dec = r->hc_dec, *pair = r->hc_pair;
+        uint32_t prev = n ? s_cur.state[n - 1u] : s_cur.prev_state;
+        for (; n < upto; ++n, i = (i + 1u) & mask) {
+            uint32_t st = dec[((prev >> 3) << 8) | ring[2u * i + 1u]];
+            s_cur.code[n] = pair[(prev << 5) | st];
+            s_cur.state[n] = (uint8_t)st;
+            prev = st;
         }
-        s_cur.code[s_cur.n++] = c;
+    } else {
+        const uint8_t *ph = r->phase;
+        uint32_t prev = ph[ring[2u * ((i - 1u) & mask) + 1u]];
+        for (; n < upto; ++n, i = (i + 1u) & mask) {
+            uint32_t ph_now = ph[ring[2u * i + 1u]];
+            s_cur.code[n] = (uint8_t)(((128u + ph_now - prev) & 255u) >> 2);
+            prev = ph_now;
+        }
     }
-    return s_cur.code[k - s_cur.base];
+    s_cur.n = n;
+}
+
+static inline uint8_t code_at(const sfw_ring_t *r, uint64_t k)
+{
+    uint64_t off = k - s_cur.base;          /* huge when k < base */
+    if (s_cur.r != r || off >= CUR_MAX) {
+        cur_open(r, k);
+        off = 0;
+    }
+    if (off >= s_cur.n) {
+        uint32_t upto = (uint32_t)off + 64u;
+        cur_fill(upto > CUR_MAX ? CUR_MAX : upto);
+    }
+    return s_cur.code[off];
 }
 
 /* HC synthesis cells per (decoder bank, state): the bank the hardware uses
@@ -303,6 +334,7 @@ unsigned sfw_run(sync_flywheel_t *f, const sfw_ring_t *r, uint64_t avail_end,
         (r->ring_pairs & (r->ring_pairs - 1u))) return 0;
     build_cells(r->phase);
     build_hc_cells(r->hc_dec);
+    s_cur.r = NULL;   /* batch fill may have read not-yet-completed data */
     if (r->hc_dec && !r->hc_pair) return 0;
     if (f->state == SFW_ACQUIRE) {
         acquire(f, r, avail_end, max_scan);
