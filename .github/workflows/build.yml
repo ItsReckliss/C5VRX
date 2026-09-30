@@ -161,6 +161,8 @@ jobs:
           /tmp/test_direct_gain_v2
           gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_direct_gain_v3.c main/direct_gain_v3.c main/arc_phy.c -o /tmp/test_direct_gain_v3
           /tmp/test_direct_gain_v3
+          gcc -std=c11 -O2 -Wall -Wextra -Werror -Imain tools/test_sync_flywheel.c main/sync_flywheel.c -o /tmp/test_sync_flywheel
+          /tmp/test_sync_flywheel
           python3 -m pip install --quiet numpy
           python3 tools/analyze_agc_words.py --self-test
           gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_rx_auto_lab.c main/rx_auto_lab.c -o /tmp/test_rx_auto_lab
