@@ -130,6 +130,34 @@ int main(void)
     assert(direct_gain_v3_tick(&v3, &settled) == next);
     assert(v3.verified == 1u && v3.learned == 0u);
 
+    /* V5 anti-hunt: a level dithering across both band edges makes the
+     * writes reverse direction; after two quick reversals every out-of-band
+     * decision needs two windows for 200 ms, then direct mode returns. */
+    direct_gain_v3_reset(&v3, &table, 40u, 62u);
+    uint64_t t = 2000000u;
+    uint32_t w0 = v3.writes;
+    for (unsigned k = 0; k < 40u; ++k) {
+        dg3_observation_t o = (k & 1u) ? obs(8, 14, 100, 0, 90, t)
+                                       : obs(40, 60, 0, 0, 95, t);
+        uint8_t g = direct_gain_v3_tick(&v3, &o);
+        direct_gain_v3_sync_applied(&v3, g, t);
+        t += 1000u;
+    }
+    assert(v3.damp_events >= 1u);
+    /* Undamped this would have written on (nearly) every window. */
+    assert(v3.writes - w0 < 30u);
+    /* After the damp period a single out-of-band window acts again. */
+    t += 300000u;
+    dg3_observation_t late = obs(8, 14, 100, 0, 90, t);
+    uint32_t writes_before_late = v3.writes;
+    (void)direct_gain_v3_tick(&v3, &late);   /* first window: direct again */
+    assert(v3.writes == writes_before_late + 1u);
+    /* Saturation is never damped. */
+    v3.damp_until_us = late.observed_us + 1000000u;
+    dg3_observation_t sat = obs(60, 110, 0, 300, 90, late.observed_us + 5000u);
+    uint8_t pre_sat = v3.current_gain;
+    assert(direct_gain_v3_tick(&v3, &sat) < pre_sat);
+
     puts("direct gain v3 core: OK");
     return 0;
 }

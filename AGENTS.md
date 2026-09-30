@@ -58,8 +58,9 @@ requirements by themselves**.
 
 ## Current realtime invariants
 
-- **Direct Gain V4 is the default gain owner** (Direct Gain V3 core, direct
-  first-window correction, table-maximum listening without a carrier). Native
+- **Direct Gain V5 is the default gain owner** (Direct Gain V3 core, direct
+  first-window correction, table-maximum listening without a carrier, 200 us
+  observer with descriptor dedupe, anti-hunt damping). Native
   hardware AGC is an opt-in menu/`N` option only: on a continuous carrier the
   C5 packet AGC re-acquires every ~21 us on a different gain, which caused
   the line noise and grain (docs/native-agc-v2.md). Do not make native AGC

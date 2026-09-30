@@ -49,6 +49,11 @@ typedef struct {
     uint8_t stable_windows;
     uint64_t write_us;
     uint32_t writes, holds, verified, learned, overloads;
+    /* V5 anti-hunt: direction reversals of consecutive writes. */
+    int8_t last_write_dir;
+    uint8_t reversals;
+    uint64_t dir_write_us, damp_until_us;
+    uint32_t damp_events;
 } direct_gain_v3_t;
 
 void direct_gain_v3_reset(direct_gain_v3_t *v3, const arc_gain_table_t *table,
