@@ -14,6 +14,7 @@ idf_component_register(
         "direct_gain.c"
         "direct_gain_v2.c"
         "direct_gain_v3.c"
+        "analog_video_detect.c"
         "menu_raster.c"
     INCLUDE_DIRS "."
     REQUIRES
