@@ -1131,7 +1131,7 @@ static const char *rx_profile_name(void)
     case RX_PROFILE_ARC_V3_EXP:  return "ARC V3 EXP";
     case RX_PROFILE_ARC_V5_AUTOTUNE_EXP: return "ARC V5 AUTOTUNE";
 #if CONFIG_C5VRX_DIRECT_GAIN_V3_EXPERIMENT
-    case RX_PROFILE_DIRECT_GAIN: return "DIRECT GAIN V4";
+    case RX_PROFILE_DIRECT_GAIN: return "DIRECT GAIN V5";
 #else
     case RX_PROFILE_DIRECT_GAIN: return "DIRECT GAIN V2";
 #endif
@@ -1472,7 +1472,8 @@ static void direct_gain_v2_fast_tick(const control_metrics_t *metrics,
  * participates in the 40 MS/s video clock. Returns false for a stale/slow copy. */
 #define RX_PROBE_REGION_BYTES 64u
 #define RX_PROBE_REGIONS      4u
-static bool rx_probe_copy_completed(uint8_t sample[RX_PROBE_REGIONS * RX_PROBE_REGION_BYTES])
+static bool rx_probe_copy_completed_idx(uint8_t sample[RX_PROBE_REGIONS * RX_PROBE_REGION_BYTES],
+                                        int *out_idx)
 {
     static const size_t offset[RX_PROBE_REGIONS] = {512u, 1536u, 2560u, 4028u};
     if (s_rx_dma_ch < 0 || s_rx_dma_ch >= 3 || s_rx_dscr_count < 2)
@@ -1494,8 +1495,14 @@ static bool rx_probe_copy_completed(uint8_t sample[RX_PROBE_REGIONS * RX_PROBE_R
     }
     if (esp_timer_get_time() - copy_start_us > 300) return false;
     active_addr = AHB_DMA.channel[s_rx_dma_ch].in.in_dscr_bf0.val;
+    if (out_idx) *out_idx = sample_idx;
     return find_dscr_index(s_rx_dscr_nodes, s_rx_dscr_count,
                            active_addr) != sample_idx;
+}
+
+static bool rx_probe_copy_completed(uint8_t sample[RX_PROBE_REGIONS * RX_PROBE_REGION_BYTES])
+{
+    return rx_probe_copy_completed_idx(sample, NULL);
 }
 
 #if CONFIG_C5VRX_DIRECT_GAIN_V3_EXPERIMENT
@@ -1532,6 +1539,10 @@ static void direct_gain_v3_sentinel_timer_cb(void *arg)
     (void)arg;
     if (s_v3_sentinel_task_handle)
         xTaskNotifyGive(s_v3_sentinel_task_handle);
+    /* V5: the observer runs on the same 200 us cadence instead of the 1 ms
+     * RTOS tick; a new RX descriptor completes every ~102 us. */
+    if (s_v3_observer_task_handle)
+        xTaskNotifyGive(s_v3_observer_task_handle);
 }
 
 static void direct_gain_v3_sentinel_task(void *arg)
@@ -1589,6 +1600,7 @@ static void direct_gain_v3_observer_task(void *arg)
     uint8_t sample[RX_PROBE_REGIONS * RX_PROBE_REGION_BYTES];
     uint32_t seen_profile = UINT32_MAX, seen_arc = UINT32_MAX;
     bool was_active = false;
+    int last_block_idx = -1;
     for (;;) {
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
         bool active = s_rx_profile == RX_PROFILE_DIRECT_GAIN &&
@@ -1622,8 +1634,13 @@ static void direct_gain_v3_observer_task(void *arg)
         }
 
         uint32_t gain_epoch = s_gain_transition_count;
-        if (!rx_probe_copy_completed(sample)) continue;
+        int block_idx = -1;
+        if (!rx_probe_copy_completed_idx(sample, &block_idx)) continue;
         if (gain_epoch != s_gain_transition_count) continue;
+        /* Never measure the same completed descriptor twice: the settle
+         * check counts consecutive stable windows and must see new data. */
+        if (block_idx == last_block_idx) continue;
+        last_block_idx = block_idx;
         dg3_observation_t observation = direct_gain_v3_measure(
             sample, sizeof(sample), c5vrx_phase8_gain_lut,
             (uint64_t)esp_timer_get_time());
@@ -3366,7 +3383,7 @@ static void arm_native_agc_and_reboot(bool enable)
     settings_save();
     esp_err_t err = rf_request_native_agc_boot(enable);
     printf("[RX PROFILE] -> %s on reboot err=%s\n",
-           enable ? "NATIVE HW AGC" : "DIRECT GAIN V4", esp_err_to_name(err));
+           enable ? "NATIVE HW AGC" : "DIRECT GAIN V5", esp_err_to_name(err));
     if (err != ESP_OK) return;
     fflush(stdout);
     vTaskDelay(pdMS_TO_TICKS(150));
@@ -5501,7 +5518,7 @@ esp_err_t video_start(void)
         rf_get_native_agc_state(&native);
         ESP_LOGW(TAG, "NATIVE HW AGC (opt-in): vendor AGC never disabled, "
                  "firmware gain writes blocked (gain_reg=0x%08lx agc_reg=0x%08lx). "
-                 "'E' = P8ENV row, 'N' = reboot to Direct Gain V4",
+                 "'E' = P8ENV row, 'N' = reboot to Direct Gain V5",
                  (unsigned long)native.gain_status_reg,
                  (unsigned long)native.agc_ctrl_reg);
     }
@@ -5586,7 +5603,7 @@ esp_err_t video_start(void)
     };
     ESP_ERROR_CHECK(esp_timer_create(&v3_timer_args,
                                      &s_v3_sentinel_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(s_v3_sentinel_timer, 500));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(s_v3_sentinel_timer, 200));
 #endif
 
     /* Start interactive console for on-demand diagnostics (zero periodic CPU/bus traffic) */

@@ -9,8 +9,10 @@ static uint8_t s_power[256];
 static uint8_t s_flags[256];
 static bool s_lut_ready;
 
-/* Direct Gain V4 = this Direct Gain V3 core plus the full-range no-carrier
- * target and the direct mode below (menu name "DIRECT GAIN V4").
+/* Direct Gain V5 = this Direct Gain V3 core plus the full-range no-carrier
+ * target, the direct mode below and anti-hunt damping (menu name
+ * "DIRECT GAIN V5"). The observer feeds one fresh RX descriptor per window
+ * on a 200 us timer cadence, so one window is ~0.2 ms.
  *
  * Direct mode: act on the first window outside the healthy band and jump
  * straight to the predicted destination. The healthy band stays a strict
@@ -19,6 +21,15 @@ static bool s_lut_ready;
 #define DG3_STABLE_WINDOWS 1u   /* was 3 */
 #define DG3_HIGH_WINDOWS   1u   /* was 2 */
 #define DG3_WEAK_WINDOWS   1u   /* was 4 */
+/* V5 anti-hunt. Direct mode must not chase a level that dithers across a
+ * band edge (fast fades, antenna nulls). Two direction reversals of
+ * consecutive writes within DG3_REVERSAL_US each arm a DG3_DAMP_US period in
+ * which an out-of-band decision needs DG3_DAMPED_WINDOWS windows. Saturation
+ * is never damped: it keeps the immediate emergency path. */
+#define DG3_REVERSAL_US     20000u
+#define DG3_REVERSALS_ARM   2u
+#define DG3_DAMP_US        200000u
+#define DG3_DAMPED_WINDOWS  8u   /* ~1.6 ms at the 200 us cadence */
 
 static int clamp_i(int value, int low, int high)
 {
@@ -352,6 +363,20 @@ static uint8_t start_write(direct_gain_v3_t *v3,
                            const dg3_observation_t *prior, uint8_t target)
 {
     if (target == v3->current_gain) return target;
+    int8_t dir = target > v3->current_gain ? 1 : -1;
+    uint64_t now = o->observed_us;
+    if (v3->last_write_dir && dir != v3->last_write_dir &&
+        now >= v3->dir_write_us && now - v3->dir_write_us < DG3_REVERSAL_US) {
+        if (++v3->reversals >= DG3_REVERSALS_ARM) {
+            v3->damp_until_us = now + DG3_DAMP_US;
+            v3->reversals = 0;
+            ++v3->damp_events;
+        }
+    } else if (now < v3->dir_write_us || now - v3->dir_write_us >= DG3_REVERSAL_US) {
+        v3->reversals = 0;
+    }
+    v3->last_write_dir = dir;
+    v3->dir_write_us = now;
     int ratio_q10 = 0, uncertainty_pm = 0;
     if (predict(v3, target, &ratio_q10, &uncertainty_pm))
         v3->virtual_gain_q8 -= ratio_db_q8(ratio_q10);
@@ -477,9 +502,11 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
         v3->last_direction = 0;
         return v3->current_gain;
     }
-    if (v3->state != DG3_VERIFY &&
-        ((high && v3->high_windows < DG3_HIGH_WINDOWS) ||
-         (weak && v3->weak_windows < DG3_WEAK_WINDOWS))) return v3->current_gain;
+    bool damped = o->observed_us < v3->damp_until_us;
+    unsigned need_high = damped ? DG3_DAMPED_WINDOWS : DG3_HIGH_WINDOWS;
+    unsigned need_weak = damped ? DG3_DAMPED_WINDOWS : DG3_WEAK_WINDOWS;
+    if ((high && v3->high_windows < need_high) ||
+        (weak && v3->weak_windows < need_weak)) return v3->current_gain;
     int target_power = weak ? 17 : 27;
     int error_q8 = power_db_q8((unsigned)target_power) -
                    power_db_q8(o->p50);

@@ -21,7 +21,7 @@
 ## Current firmware
 
 The `main` build defaults to the live adjacent Phase8 demodulator and
-**Direct Gain V4**, the default and recommended gain controller. Phase8 maps
+**Direct Gain V5** (Direct Gain V4 below plus a 200 us observer and anti-hunt damping), the default and recommended gain controller. Phase8 maps
 the full signed adjacent phase delta (-128 through +127) to the 6-bit DAC. A
 transition across the +/-180 degree phase boundary can still alias.
 
@@ -156,8 +156,9 @@ The continuous pixel path runs in AHB GDMA, BitScrambler, and PARLIO TX. A backg
 - **The Solution**: C5VRX-3 patches `dw0.suc_eof = 0` across the descriptor ring in SRAM after driver initialization, paired with 64-byte aligned cache synchronization (`sync_dma_c2m`).
 - **The Result**: Truly gapless, infinite circular streaming with zero wrap bubbles, rock-solid vertical sync lock, and crystal-clear horizontal alignment.
 
-### 2. Direct Gain V4 default gain controller
-- The fast observer measures centered Q4 P50/P90/P95, phase coherence, clipping, and origin occupancy from completed RX buffers every 1 ms.
+### 2. Direct Gain V5 default gain controller
+- V5 = V4 plus a 200 us observer cadence (timer-driven, each completed RX descriptor measured at most once) and anti-hunt damping: two direction reversals of consecutive writes within 20 ms make out-of-band decisions need 8 windows (~1.6 ms) for 200 ms. Saturation is never damped.
+- The fast observer measures centered Q4 P50/P90/P95, phase coherence, clipping, and origin occupancy from completed RX buffers.
 - V4 is the sole automatic gain writer in the default profile. It chooses physical RF/BB/Fine gain tuples and verifies each write after its measured settle time.
 - Direct: the first window with P50 below 13 or above 32 triggers the full predicted correction in one step; saturation takes an immediate emergency drop.
 - Healthy measurements (P50 13-32) produce a zero-write hold, so a steady carrier gets no gain writes.
