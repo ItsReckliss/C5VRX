@@ -55,9 +55,17 @@ partition table plus app, using this project's `flasher_args.json`.
 No automatic flash is performed by the build.
 
 Build record (2026-09-30): ESP-IDF v6.0.2 Docker build completed successfully;
-application size `0x115760` bytes, version `4.0.0-exp-span75`. No tests or
-hardware evaluation were run. The ordinary root application was not rebuilt
-in this implementation session.
+application size `0x115760` bytes, version `4.0.0-exp-span75`. The ordinary
+root application was not rebuilt in this implementation session.
+
+## First hardware observation (2026-09-30)
+
+Commit `162c2ab` was flashed on the connected ESP32-C5, including the matching
+bootloader and partition table; esptool verified the written hashes. The
+operator reported usable video, some noise, and a less clean picture than
+C5VRX-3. This is the starting prototype for further development, not evidence
+of additional range. No controlled attenuation comparison or instrumentation
+of the output waveform has been performed.
 
 ## First firmware contract
 

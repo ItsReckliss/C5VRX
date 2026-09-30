@@ -72,4 +72,6 @@ The DAC mapping uses nominal resistor values, not a measured board calibration.
 This prototype does not implement full-range I6/Q6 capture, complex filtering,
 a tracking FM demodulator or matched de-emphasis. Those require separate design
 work; whether additional processing hardware is acceptable remains unresolved.
-The current source has not been flashed or evaluated on hardware.
+The first build (`162c2ab`) was flashed and produced usable video. The operator
+reported a less clean picture than C5VRX-3; no range improvement was established.
+See the README hardware observation for the scope of this first comparison.

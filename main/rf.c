@@ -326,9 +326,6 @@ esp_err_t rf_prepare_fresh_phy_calibration(void)
 
 static bool native_agc_boot_requested(void)
 {
-#ifdef C5VRX4_EXPERIMENT
-    return true; /* Experiment owns its boot policy; do not modify main NVS. */
-#else
     nvs_handle_t handle;
     uint8_t value = 0;
     if (nvs_open(NATIVE_AGC_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
@@ -336,7 +333,6 @@ static bool native_agc_boot_requested(void)
     if (nvs_get_u8(handle, NATIVE_AGC_NVS_KEY, &value) != ESP_OK) value = 0;
     nvs_close(handle);
     return value == 1u;
-#endif
 }
 
 esp_err_t rf_request_native_agc_boot(bool enable)
@@ -385,7 +381,11 @@ esp_err_t rf_start(void)
     /* NVS is required by ESP-IDF Wi-Fi/PHY initialization. */
     esp_err_t err = init_nvs();
     if (err != ESP_OK) return err;
+#ifdef C5VRX4_EXPERIMENT
+    s_native_agc = true; /* Separate experiment policy; do not modify main NVS. */
+#else
     s_native_agc = native_agc_boot_requested();
+#endif
 
     /* esp_netif_init + default event loop are required by esp_wifi_init().
      * Tolerant of ESP_ERR_INVALID_STATE (already initialized by IDF). */
