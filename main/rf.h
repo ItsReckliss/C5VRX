@@ -98,6 +98,13 @@ typedef struct {
 esp_err_t rf_request_native_agc_boot(bool enable);
 void rf_dump_agc_regs(void);
 bool rf_native_agc_active(void);
+
+/* Range lanes (rf.c): 0 coarse, 1 fine (+6 dB), 2 ultrafine (+12 dB).
+ * Exact power-of-two rescale of the Q4 nibble inside each set's window; a
+ * live GPIO-matrix remap. Only Direct Gain selects finer sets. */
+#define RF_IQ_LANE_SETS 3u
+void rf_set_iq_lanes(uint8_t set);
+uint8_t rf_get_iq_lanes(void);
 void rf_get_native_agc_state(rf_native_agc_state_t *state);
 
 /**

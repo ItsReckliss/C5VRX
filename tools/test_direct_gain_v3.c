@@ -158,6 +158,63 @@ int main(void)
     uint8_t pre_sat = v3.current_gain;
     assert(direct_gain_v3_tick(&v3, &sat) < pre_sat);
 
+    /* Range lanes: continuous total gain beyond the table maximum. */
+    {
+        uint8_t max = table.max_index;
+        uint64_t t = 20000000u;
+        direct_gain_v3_reset(&v3, &table, max, 62u);
+        /* Disabled by default: a starved envelope changes nothing. */
+        dg3_observation_t starved = obs(2, 3, 400, 0, 30, t);
+        assert(direct_gain_v3_tick(&v3, &starved) == max && v3.lane == 0u);
+
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        starved.observed_us = t += 1000u;
+        /* P50 2 -> x16 = 32: the finest lane lands in band in one step. */
+        assert(direct_gain_v3_tick(&v3, &starved) == max && v3.lane == 2u);
+        /* Windows that may hold pre-switch samples are ignored. */
+        dg3_observation_t early = obs(60, 110, 0, 300, 90, t + 100u);
+        assert(direct_gain_v3_tick(&v3, &early) == max && v3.lane == 2u);
+        /* Rail codes on a finer lane: back to coarse at once. */
+        dg3_observation_t rail = obs(30, 70, 0, 40, 95, t += 1000u);
+        uint32_t drops = v3.fold_drops;
+        assert(direct_gain_v3_tick(&v3, &rail) == max && v3.lane == 0u);
+        assert(v3.fold_drops == drops + 1u);
+
+        /* Folded junk (incoherent, wide, not quiet) also drops the lane. */
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        v3.lane = 2u; v3.lane_us = 0u;
+        dg3_observation_t junk = obs(20, 60, 100, 10, 12, t += 1000u);
+        assert(direct_gain_v3_tick(&v3, &junk) == max && v3.lane == 0u);
+
+        /* P50 12 cannot land in the <6 dB band: take one lane (48) and let
+         * the analog gain trim the overshoot instead of dropping the lane. */
+        direct_gain_v3_reset(&v3, &table, max, 62u);
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        dg3_observation_t twelve = obs(12, 20, 0, 0, 95, t += 1000u);
+        (void)direct_gain_v3_tick(&v3, &twelve);
+        assert(v3.lane == 1u);
+        dg3_observation_t over = obs(48, 70, 0, 0, 95, t += 1000u);
+        uint8_t g = direct_gain_v3_tick(&v3, &over);
+        assert(v3.lane == 1u && g < max);
+
+        /* No carrier at the maximum: listen on the finest lane. */
+        direct_gain_v3_reset(&v3, &table, max, 62u);
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        dg3_observation_t none = obs(1, 3, 980, 0, 5, t += 1000u);
+        assert(direct_gain_v3_tick(&v3, &none) == max && v3.lane == 2u);
+        /* A strong VTX switching on folds: junk -> coarse. */
+        dg3_observation_t vtx = obs(40, 100, 50, 250, 20, t += 1000u);
+        (void)direct_gain_v3_tick(&v3, &vtx);
+        assert(v3.lane == 0u);
+
+        /* Lanes are never entered below the analog maximum. */
+        direct_gain_v3_reset(&v3, &table, 40u, 62u);
+        direct_gain_v3_enable_lanes(&v3, 2u);
+        dg3_observation_t weak = obs(8, 14, 100, 0, 90, t += 1000u);
+        (void)direct_gain_v3_tick(&v3, &weak);
+        assert(v3.lane == 0u);
+    }
+
     puts("direct gain v3 core: OK");
     return 0;
 }

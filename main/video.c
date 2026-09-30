@@ -1520,6 +1520,12 @@ static void direct_gain_v3_apply_target(uint8_t target, uint32_t profile)
     s_last_direct_gain_delta = (int)target - (int)s_current_gain;
     s_last_direct_gain_total_writes = s_direct_gain_v3.writes;
     s_last_direct_gain_hold_cycles = s_direct_gain_v3.holds;
+    if (s_direct_gain_v3.lane != rf_get_iq_lanes()) {
+        /* Range lane switch: bump the epoch so no in-flight measurement
+         * mixes samples from both lane sets. */
+        rf_set_iq_lanes(s_direct_gain_v3.lane);
+        ++s_gain_transition_count;
+    }
     if (target != s_current_gain) {
         ++s_direct_gain_v2_write_seq;
         __sync_synchronize();
@@ -1610,6 +1616,11 @@ static void direct_gain_v3_observer_task(void *arg)
         if (!active) {
             was_active = false;
             (void)__sync_lock_test_and_set(&s_v3_fast_overload_state, 0u);
+            /* Finer range lanes are owned by Direct Gain only. */
+            if (rf_get_iq_lanes()) {
+                rf_set_iq_lanes(0u);
+                ++s_gain_transition_count;
+            }
             continue;
         }
         uint32_t profile = s_profile_generation;
@@ -1618,6 +1629,12 @@ static void direct_gain_v3_observer_task(void *arg)
             s_direct_gain_v3.current_gain != s_current_gain) {
             direct_gain_v3_reset(&s_direct_gain_v3, rf_get_arc_gain_table(),
                                  s_current_gain, rf_get_arc_survival_gain());
+            direct_gain_v3_enable_lanes(&s_direct_gain_v3,
+                                        (uint8_t)(RF_IQ_LANE_SETS - 1u));
+            if (rf_get_iq_lanes()) {
+                rf_set_iq_lanes(0u);
+                ++s_gain_transition_count;
+            }
             seen_profile = profile;
             seen_arc = arc;
             was_active = true;
@@ -1660,7 +1677,8 @@ static int signal_strength_score(const control_metrics_t *m, uint8_t gain)
 {
     if (m->q_phase < 18 || m->origin_permille > 850) return 0;
     int coherence = (m->q_phase - 18) * 100 / 62;
-    int power = (m->p_median - 6) * 100 / 28;
+    /* A finer range lane shows the envelope 2^k larger: undo it (power). */
+    int power = ((m->p_median >> (2u * rf_get_iq_lanes())) - 6) * 100 / 28;
     int max_gain = profile_gain_max();
     int gain_headroom = (max_gain - (int)gain) * 100 /
                         (max_gain > 2 ? max_gain - 2 : 1);
@@ -1968,11 +1986,15 @@ static void lab_print_row(const char *kind, const hw_transport_counters_t *base)
            transport_age_ms, (unsigned long)s_last_transport_flags);
 #if CONFIG_C5VRX_DIRECT_GAIN_V3_EXPERIMENT
     printf("DG3_OBS p50=%d p90=%d p95=%d origin_pm=%d clip_pm=%d coherence=%d "
-           "state=%u gain=%u virtual_q8=%ld writes=%lu holds=%lu verified=%lu learned=%lu "
+           "state=%u gain=%u lane=%u lane_changes=%lu fold_drops=%lu "
+           "virtual_q8=%ld writes=%lu holds=%lu verified=%lu learned=%lu "
            "settle_fine_us=%u settle_bb_us=%u settle_rf_us=%u\n",
            s_v3_p50, s_v3_p90, s_v3_p95, s_v3_origin_pm, s_v3_clip_pm,
            s_v3_coherence,
            (unsigned)s_direct_gain_v3.state, s_current_gain,
+           (unsigned)rf_get_iq_lanes(),
+           (unsigned long)s_direct_gain_v3.lane_changes,
+           (unsigned long)s_direct_gain_v3.fold_drops,
            (long)s_direct_gain_v3.virtual_gain_q8,
            (unsigned long)s_direct_gain_v3.writes,
            (unsigned long)s_direct_gain_v3.holds,
