@@ -81,7 +81,10 @@ static analog_video_t run(sig_t sig, double radius, double line_us,
         q += sigma * gauss();
         buf[n] = quantize(i, q);
     }
-    return analog_video_detect(buf, BYTES, 0u, c5vrx_phase8_gain_lut);
+    /* Endpoints: odd bytes (ring offset 0), as the firmware copies them. */
+    static uint8_t ep[BYTES / 2u];
+    for (unsigned k = 0; k < BYTES / 2u; ++k) ep[k] = buf[2u * k + 1u];
+    return analog_video_detect(ep, BYTES / 2u, c5vrx_phase8_gain_lut);
 }
 
 static int worst(sig_t sig, double r, double line_us, bool rnd, double cfo, bool max)

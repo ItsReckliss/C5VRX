@@ -1,25 +1,22 @@
 #include "analog_video_detect.h"
 
-#define AVD_MAX_PAIRS 4096u
 #define AVD_LAG_MIN   1266
 #define AVD_LAG_MAX   1285
 
-analog_video_t analog_video_detect(const uint8_t *raw, size_t bytes,
-                                   size_t ring_offset, const uint8_t phase[256])
+analog_video_t analog_video_detect(uint8_t *ep, size_t n, const uint8_t phase[256])
 {
-    static int8_t d[AVD_MAX_PAIRS];
     analog_video_t out = {0, 0, 0};
-    if (!raw || !phase || bytes < 4u) return out;
-    /* Endpoint = odd ring byte: first endpoint index inside `raw`. */
-    size_t first = (ring_offset & 1u) ? 0u : 1u;
-    size_t n = 0;
-    uint8_t prev = phase[raw[first]];
-    for (size_t i = first + 2u; i < bytes && n < AVD_MAX_PAIRS; i += 2u) {
-        uint8_t p = phase[raw[i]];
-        d[n++] = (int8_t)(uint8_t)(p - prev);      /* wrapped 50 ns step */
+    if (!ep || !phase || n < (size_t)AVD_LAG_MAX + 257u) return out;
+    /* In place: ep[k] becomes the wrapped 50 ns phase step into endpoint
+     * k+1 (a signed byte). No extra memory. */
+    uint8_t prev = phase[ep[0]];
+    for (size_t k = 0; k + 1u < n; ++k) {
+        uint8_t p = phase[ep[k + 1u]];
+        ep[k] = (uint8_t)(p - prev);
         prev = p;
     }
-    if (n < (size_t)AVD_LAG_MAX + 256u) return out;
+    --n;
+    const int8_t *d = (const int8_t *)ep;
 
     int32_t sum = 0;
     for (size_t k = 0; k < n; ++k) sum += d[k];

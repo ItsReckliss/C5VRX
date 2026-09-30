@@ -4238,41 +4238,43 @@ static void init_boot_button(void)
     gpio_config(&cfg);
 }
 
-/* Copy the most recent `bytes` of RX-completed ring data (ends where RX is
- * writing now), unwrapping the ring. */
-static bool copy_recent_ring(uint8_t *dst, size_t bytes, size_t *ring_offset)
+/* Copy the endpoint bytes (odd ring byte of each pair, as Phase8 reads
+ * them) of the most recent `n` RX-completed pairs, unwrapping the ring. */
+static bool copy_recent_endpoints(uint8_t *dst, size_t n)
 {
     if (s_rx_dma_ch < 0 || s_rx_dma_ch >= 3 || s_rx_dscr_count < 2 ||
-        bytes > sizeof(s_raw_ring) / 2u) return false;
+        2u * n > sizeof(s_raw_ring) / 2u) return false;
     int idx = find_dscr_index(s_rx_dscr_nodes, s_rx_dscr_count,
                               AHB_DMA.channel[s_rx_dma_ch].in.in_dscr_bf0.val);
     if (idx < 0) return false;
     uint8_t *buf = s_rx_dscr_nodes[idx].buffer;
     if (buf < s_raw_ring || buf >= s_raw_ring + sizeof(s_raw_ring)) return false;
-    size_t end = (size_t)(buf - s_raw_ring);
-    size_t start = (end + sizeof(s_raw_ring) - bytes) % sizeof(s_raw_ring);
-    size_t first = sizeof(s_raw_ring) - start < bytes ? sizeof(s_raw_ring) - start : bytes;
+    size_t end = (size_t)(buf - s_raw_ring) & ~(size_t)1u;
+    size_t pos = (end + sizeof(s_raw_ring) - 2u * n) % sizeof(s_raw_ring);
     sync_dma_m2c(s_raw_ring, sizeof(s_raw_ring));
-    memcpy(dst, s_raw_ring + start, first);
-    if (first < bytes) memcpy(dst + first, s_raw_ring, bytes - first);
-    *ring_offset = start;
+    for (size_t k = 0; k < n; ++k) {
+        dst[k] = s_raw_ring[pos + 1u];
+        pos = (pos + 2u) % sizeof(s_raw_ring);
+    }
     return true;
 }
 
-/* Issue #128: median analog-video confidence of three ~8 KB windows on the
- * current channel (line-period autocorrelation, analog_video_detect.c). */
-#define SCAN_VIDEO_BYTES 8184u
-static uint8_t s_scan_video_buf[SCAN_VIDEO_BYTES];
+/* Issue #128: median analog-video confidence of three windows of ~4096
+ * endpoints on the current channel (analog_video_detect.c). The window is
+ * heap-allocated only for the duration of a scan: static buffers took the
+ * internal heap the standalone menu needs (ESP_ERR_NO_MEM). */
+#define SCAN_VIDEO_PAIRS 4092u
+static uint8_t *s_scan_video_buf;
 
 static analog_video_t scan_video_confidence(void)
 {
     analog_video_t v[3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+    if (!s_scan_video_buf) return v[0];
     for (unsigned w = 0; w < 3u; ++w) {
         if (w) vTaskDelay(pdMS_TO_TICKS(10));
-        size_t off = 0;
-        if (copy_recent_ring(s_scan_video_buf, sizeof(s_scan_video_buf), &off))
-            v[w] = analog_video_detect(s_scan_video_buf, sizeof(s_scan_video_buf),
-                                       off, c5vrx_phase8_gain_lut);
+        if (copy_recent_endpoints(s_scan_video_buf, SCAN_VIDEO_PAIRS))
+            v[w] = analog_video_detect(s_scan_video_buf, SCAN_VIDEO_PAIRS,
+                                       c5vrx_phase8_gain_lut);
     }
     /* median by confidence */
     analog_video_t a = v[0], b = v[1], c = v[2], t;
@@ -4296,6 +4298,9 @@ static void channel_auto_search(void)
     s_channel_scan_active = true;
     s_channel_scan_progress = 0;
     rf_set_rx_gain(true, 52u); /* Compare every channel at the same RF gain. */
+    s_scan_video_buf = heap_caps_malloc(SCAN_VIDEO_PAIRS, MALLOC_CAP_INTERNAL);
+    if (!s_scan_video_buf)
+        printf("[AUTO SEARCH] no memory for the video check; channel kept\n");
 
     /* Issue #128: RF strength alone let 5 GHz Wi-Fi win (and pull the scan
      * into the L band). A channel only qualifies with analog-video
@@ -4369,6 +4374,8 @@ static void channel_auto_search(void)
         best_channel = original_channel;
         best_rank = -1;
     }
+    heap_caps_free(s_scan_video_buf);
+    s_scan_video_buf = NULL;
     (void)rf_set_channel(best_channel);
     rf_set_rx_gain(true, original_gain);
     ++s_profile_generation;

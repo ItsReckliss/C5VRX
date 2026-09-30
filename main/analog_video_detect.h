@@ -14,11 +14,11 @@
  * VTX deviation (normalized), so it separates a real analog carrier from
  * strong but invalid RF energy without absolute sync thresholds.
  *
- * Use at least ~8 KB (two descriptors, >3 lines): at a one-line lag the
- * overlap must always contain a sync pulse, which one 4 KB descriptor (766
- * overlapping pairs) does only ~60 % of the time with a moving picture.
- * `raw` holds 16-bit ring pairs; `ring_offset` is the byte offset of raw[0]
- * in the ring (the endpoint is the odd ring byte, as Phase8 reads it).
+ * `ep` holds consecutive endpoint bytes (the odd ring byte of each pair, as
+ * Phase8 reads it) and is overwritten in place (no extra memory: the menu
+ * needs the internal heap). Use ~4096 endpoints (>3 lines): at a one-line
+ * lag the overlap must always contain a sync pulse, which 2046 endpoints
+ * (766 overlapping) do only ~60 % of the time with a moving picture.
  * `phase` is the Phase8 phase LUT (256 entries). */
 typedef struct {
     int confidence;   /* peak autocorrelation x100 over the line lags, <=0 = none */
@@ -26,8 +26,7 @@ typedef struct {
     int standard;     /* 1 = PAL, 2 = NTSC, 0 = unknown */
 } analog_video_t;
 
-analog_video_t analog_video_detect(const uint8_t *raw, size_t bytes,
-                                   size_t ring_offset, const uint8_t phase[256]);
+analog_video_t analog_video_detect(uint8_t *ep, size_t n, const uint8_t phase[256]);
 
 /* A channel counts as analog video when its confidence is at least this. */
 /* Host test: analog video >= 31 even weak (C/N ~10 dB) or with a fully
