@@ -1119,6 +1119,7 @@ typedef enum {
 
 static const char *rx_profile_name(void)
 {
+    if (rf_native_agc_active()) return "NATIVE HW AGC";
     switch (s_rx_profile) {
     case RX_PROFILE_RANGE_EXP:    return "RANGE EXP";
     case RX_PROFILE_BLOCKER_EXP:  return "BLOCKER EXP";
@@ -1130,7 +1131,7 @@ static const char *rx_profile_name(void)
     case RX_PROFILE_ARC_V3_EXP:  return "ARC V3 EXP";
     case RX_PROFILE_ARC_V5_AUTOTUNE_EXP: return "ARC V5 AUTOTUNE";
 #if CONFIG_C5VRX_DIRECT_GAIN_V3_EXPERIMENT
-    case RX_PROFILE_DIRECT_GAIN: return "DIRECT GAIN V3 TEST";
+    case RX_PROFILE_DIRECT_GAIN: return "DIRECT GAIN V4";
 #else
     case RX_PROFILE_DIRECT_GAIN: return "DIRECT GAIN V2";
 #endif
@@ -3338,8 +3339,32 @@ static void apply_rx_profile(rx_profile_t profile)
     video_standard_detector_reset();
 }
 
+static void arm_native_agc_and_reboot(bool enable)
+{
+    settings_save();
+    esp_err_t err = rf_request_native_agc_boot(enable);
+    printf("[RX PROFILE] -> %s on reboot err=%s\n",
+           enable ? "NATIVE HW AGC" : "DIRECT GAIN V4", esp_err_to_name(err));
+    if (err != ESP_OK) return;
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(150));
+    esp_restart();
+}
+
 static void cycle_rx_profile(void)
 {
+    /* Direct Gain V4 is the default. Native hardware AGC stays selectable as
+     * the last stop of the cycle; it is chosen per boot, so entering and
+     * leaving it reboots (docs/native-agc-v2.md explains why it is not the
+     * default: it re-acquires 1-2x per video line on a different gain). */
+    if (rf_native_agc_active()) {
+        arm_native_agc_and_reboot(false);
+        return;
+    }
+    if (s_rx_profile == RX_PROFILE_ARC_V3_EXP) {
+        arm_native_agc_and_reboot(true);
+        return;
+    }
     rx_profile_t next = s_rx_profile == RX_PROFILE_DIRECT_GAIN ?
                         RX_PROFILE_DIRECT_GAIN_V1 :
                         s_rx_profile == RX_PROFILE_DIRECT_GAIN_V1 ?
@@ -3702,6 +3727,7 @@ static void menu_draw_rf_page(void)
 {
     char buf[32];
     menu_draw_page_title("RF FRONTEND",
+                         rf_native_agc_active() ? "OPTION" :
                          s_rx_profile == RX_PROFILE_DIRECT_GAIN ? "DEFAULT" : "A/B");
     menu_ui_value_box(100, 22, 276, "RX PROFILE", rx_profile_name());
     menu_ui_value_box(100, 34, 130, "BANDWIDTH", rf_bw_mode_name());

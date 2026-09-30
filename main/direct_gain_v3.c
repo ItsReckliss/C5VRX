@@ -9,7 +9,10 @@ static uint8_t s_power[256];
 static uint8_t s_flags[256];
 static bool s_lut_ready;
 
-/* Direct mode: act on the first window outside the healthy band and jump
+/* Direct Gain V4 = this Direct Gain V3 core plus the full-range no-carrier
+ * target and the direct mode below (menu name "DIRECT GAIN V4").
+ *
+ * Direct mode: act on the first window outside the healthy band and jump
  * straight to the predicted destination. The healthy band stays a strict
  * zero-write zone and the per-transition hysteresis is unchanged, so a
  * steady carrier still gets no gain writes (no per-line pumping). */
