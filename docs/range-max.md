@@ -56,7 +56,14 @@ never written (vertical interval). Above ~25 % repaired lines (EMA ~65 ms)
 the burst window is written at blank level so the goggle switches to
 monochrome instead of rainbow colour; released below 5 %. The tracked period
 also drives the PAL/NTSC detection. Console: `B` repair, `M` colour killer.
-Both are on by default; AGENTS.md has an explicit exception for the
+**Hardware status (2026-09-30): off by default.** On the chip it measured
+~0.5 us per demodulated code even at -O2; at a 25 % CPU share that covers
+only ~1 line in 6, and the first on-by-default builds starved IDLE (task
+watchdog) until it was budgeted. It is self-paced now (learned ns/code,
+50 us per 200 us wake, streaming acquisition, skip-ahead, fast path) and
+safe to enable with `B`, but it needs a large speed-up before it is useful.
+The operator saw no difference on a strong signal, as designed (no broken
+pulses to repair). Earlier plan: Both are on by default; AGENTS.md has an explicit exception for the
 flywheel (operator decision 2026-09-30). A detected real pulse is never
 rewritten, even when it sits off the prediction after coasting; the search
 window widens with coasted lines (+-16 up to +-40). The field counter coasts

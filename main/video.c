@@ -292,9 +292,11 @@ static TaskHandle_t s_v3_observer_task_handle;
  * killer. Both default on; clean lines are never modified. */
 static sync_flywheel_t s_sfw;
 static TaskHandle_t s_sfw_task_handle;
-/* On by default (AGENTS.md exception): only missing/malformed pulses are
- * rewritten; clean lines and the vertical interval are never touched. */
-static volatile bool s_sfw_enabled = true, s_sfw_colour_kill = true;
+/* Off by default until it is fast enough on the chip: measured ~0.5 us
+ * per code, so at a 25 % CPU share it analyses only ~1 line in 6 (and an
+ * earlier minimum budget starved IDLE -> task watchdog). 'B' / 'M' enable
+ * it for experiments; the pacing keeps it within SFW_TARGET_US per wake. */
+static volatile bool s_sfw_enabled = false, s_sfw_colour_kill = false;
 /* History-conditioned demodulator (fm_hc.bsasm), chosen per boot from NVS
  * c5vrx/hc_demod = 1 ('P' toggles and reboots). Default Phase8 FULL. */
 static bool s_hc_demod;
@@ -1752,7 +1754,9 @@ static void sync_flywheel_task(void *arg)
             if (!s_sfw_ns_per_code) s_sfw_ns_per_code = 1u;
         }
         uint32_t budget = SFW_TARGET_US * 1000u / s_sfw_ns_per_code;
-        s_sfw_budget = budget < 256u ? 256u : budget > 20000u ? 20000u : budget;
+        /* Never exceed the time target: a low floor only guarantees
+         * progress (the old 256-code floor forced ~130 us per 200 us). */
+        s_sfw_budget = budget < 32u ? 32u : budget > 20000u ? 20000u : budget;
         if (s_sfw.repaired != repaired || kill || s_sfw.colour_kill)
             sync_dma_c2m(s_raw_ring, RAW_RING_BYTES);
         int std = sfw_standard(&s_sfw);
