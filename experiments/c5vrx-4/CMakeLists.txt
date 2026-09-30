@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+get_filename_component(C5VRX_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+set(C5VRX4_EXPERIMENT ON)
+set(PROJECT_VER "4.0.0-exp-span75")
+set(EXTRA_COMPONENT_DIRS "${C5VRX_ROOT}/main")
+set(SDKCONFIG_DEFAULTS "${C5VRX_ROOT}/sdkconfig.defaults;${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults")
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(c5vrx4)

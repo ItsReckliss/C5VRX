@@ -15,6 +15,9 @@
 #include "bs_relative_middle_probe.h"
 #include "bs_addctia_probe.h"
 #include "phy_phase_tap_probe.h"
+#ifdef C5VRX4_EXPERIMENT
+#include "c5vrx4.h"
+#endif
 
 void app_main(void)
 {
@@ -35,5 +38,8 @@ void app_main(void)
     phy_phase_tap_probe_run();
 #endif
     ESP_ERROR_CHECK(video_start());
+#ifdef C5VRX4_EXPERIMENT
+    c5vrx4_start();
+#endif
     /* Hardware pipeline is running. Application has nothing more to do. */
 }

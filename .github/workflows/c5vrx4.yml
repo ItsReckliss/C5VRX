@@ -1,0 +1,40 @@
+name: C5VRX-4 Experimental Build
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'experiments/c5vrx-4/**'
+      - 'main/**'
+      - 'sdkconfig.defaults'
+      - 'partitions.csv'
+      - '.github/workflows/c5vrx4.yml'
+permissions:
+  contents: read
+concurrency:
+  group: c5vrx4-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate experimental program
+        run: python3 experiments/c5vrx-4/generate_pipeline.py
+      - name: Build isolated C5VRX-4 target
+        shell: bash
+        working-directory: experiments/c5vrx-4
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -DIDF_TARGET=esp32c5 build
+      - name: Upload experimental firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: c5vrx4-experimental-${{ github.event.pull_request.head.sha || github.sha }}
+          if-no-files-found: error
+          path: |
+            experiments/c5vrx-4/build/c5vrx4.bin
+            experiments/c5vrx-4/build/c5vrx4.elf
+            experiments/c5vrx-4/build/bootloader/bootloader.bin
+            experiments/c5vrx-4/build/partition_table/partition-table.bin
+            experiments/c5vrx-4/build/flasher_args.json

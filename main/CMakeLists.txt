@@ -35,6 +35,7 @@ idf_component_register(
         heap
         hal
         esp_hw_support
+        esp_driver_gptimer
 )
 
 # Proven default plus opt-in experimental demod/output paths.
@@ -48,3 +49,6 @@ target_bitscrambler_add_src("fm4.bsasm")
 target_bitscrambler_add_src("bs_addctia_probe.bsasm")
 target_bitscrambler_add_src("fm_phase8_hr_live.bsasm")
 target_bitscrambler_add_src("fm_hc.bsasm")
+if(C5VRX4_EXPERIMENT)
+    include("${PROJECT_DIR}/component.cmake")
+endif()
