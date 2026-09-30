@@ -69,25 +69,40 @@ bw_switches, fold_drops) and `SFW` (lock, standard, repaired, missed, levels,
 colour killer). `tools/range_logger.py PORT out.csv` logs it continuously;
 typed lines become marker rows ("picture lost", "30 dB").
 
-## Demodulator limits (two bundles per output pair)
+## Demodulator: what fits two bundles
 
-The live program reads one 16-bit pair per two bundles and can do exactly one
-LUT lookup per bundle (the LUT address is bits 16..25 of the bundle word).
-Phase8 uses them for: phase of the new endpoint, and the retained minus term.
+The live program reads one 16-bit pair per two bundles and does exactly one
+LUT lookup per bundle (address = bundle word bits 16..25, 1024 x 16 bit).
 
 - The live Phase8 already spans 50 ns endpoint-to-endpoint (the test feeds
-  pairs `(0, endpoint)`), so there is no "+6 dB from the unused half".
-- Sigma (`wrap(d01) + wrap(d12)`, keeps the winding the endpoint loses on
-  ~8 % of weak-IQ pairs) needs the middle sample's phase as well: three
-  lookups and two wraps per pair.
-- Click suppression by IQ confidence and SNR-adaptive MMSE tables need the
-  *pair* jointly as a LUT address (16 bits of IQ); the LUT has 10 address
-  bits, so each sample first needs a reducing lookup: at least four lookups
-  per pair.
+  pairs `(0, endpoint)`); there is no "+6 dB from an unused half".
+- With **8-bit phase**, Sigma (`wrap(d01) + wrap(d12)`), confidence-based
+  click suppression and MMSE tables all need more lookups per pair than the
+  two available. That narrower statement holds.
+- With **5-bit phase states** the Golden Phase5 two-stage shape *does* give a
+  pair-joint LUT: raw byte (+2 bits) -> 5-bit state, then (previous state,
+  current state) -> DAC. Golden already maps near-origin samples to an invalid
+  state -> pedestal. So confidence- or history-conditioned estimation fits at
+  5-bit precision. The strongest candidate is the history-conditioned phase
+  estimator in `long-range-two-bundle-research.md` (PR #122 worktree): the
+  decoder is addressed by raw IQ plus the retained phase quadrant. It must beat
+  Phase5 and Phase8 at matched RF input before it can replace anything.
 
-None fits two bundles; earlier exact-adjacent attempts hit the same limit.
-They need a different architecture (e.g. halving the output rate, or a second
-processing stage), not a LUT change.
+## Gain-policy corrections (from the same review)
+
+- `emergency_drop()` now removes BB gain before the RF stage: the RF stage sets
+  the noise figure and an outer-cell reading cannot tell front-end
+  compression from BB/ADC overdrive. A still-saturated next window takes the
+  RF stage.
+- Saturation no longer waits for a settling write: after an upward write, or
+  once the 300 us freshness floor has passed after a downward one (a stale
+  pre-write window must not cause a second drop).
+- The outer-cell "clip" flag (codes -8/+7, which includes raw 448..511)
+  overstates real ADC-limit exceedance; the model in that review shows only
+  ~0.9 dB chroma-noise benefit from radius 6.5 vs 5.5 at C/N 20 and almost
+  none at C/N 12. This matches the hardware L0/L1/L2 A/B (no visible difference).
+- BW20's effect at the MODEM_DIAG tap is unproven. First measurement: VTX off,
+  `noise_r2_q4` at BW40 vs BW20 (`W`/menu), before trusting the gear.
 
 ## Hardware plan (not firmware)
 

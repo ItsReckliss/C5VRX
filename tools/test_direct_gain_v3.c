@@ -254,6 +254,34 @@ int main(void)
         assert(v3.lane == 1u);
     }
 
+    /* Overload removes BB gain before the RF stage (noise figure). */
+    {
+        uint8_t max = table.max_index;
+        direct_gain_v3_reset(&v3, &table, max, 62u);
+        const arc_gain_tuple_t top = v3.tuple[max];
+        dg3_observation_t sat = obs(70, 110, 0, 300, 90, 50000000u);
+        uint8_t g = direct_gain_v3_tick(&v3, &sat);
+        assert(g < max);
+        if (top.bb_code > 1u) assert(v3.tuple[g].rf_stage == top.rf_stage);
+    }
+    /* Saturation during the settle of an upward write acts at once. */
+    {
+        direct_gain_v3_reset(&v3, &table, 40u, 62u);
+        dg3_observation_t weak = obs(8, 14, 100, 0, 90, 60000000u);
+        uint8_t up = direct_gain_v3_tick(&v3, &weak);
+        assert(up > 40u);
+        direct_gain_v3_sync_applied(&v3, up, weak.observed_us);
+        assert(v3.state == DG3_SETTLE);
+        dg3_observation_t sat = obs(70, 110, 0, 300, 90, weak.observed_us + 50u);
+        assert(direct_gain_v3_tick(&v3, &sat) < up);
+        /* After a downward write a stale saturated window inside the 300 us
+         * floor is ignored (no double drop). */
+        uint8_t down = v3.current_gain;
+        direct_gain_v3_sync_applied(&v3, down, sat.observed_us);
+        dg3_observation_t stale = obs(70, 110, 0, 300, 90, sat.observed_us + 100u);
+        assert(direct_gain_v3_tick(&v3, &stale) == down);
+    }
+
     puts("direct gain v3 core: OK");
     return 0;
 }

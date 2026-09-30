@@ -265,16 +265,13 @@ static uint8_t adjacent_physical(const direct_gain_v3_t *v3, bool up)
     return best;
 }
 
+/* Overload: remove late (BB) gain first. The RF stage sets the noise
+ * figure, and an outer-cell/rail reading cannot tell front-end compression
+ * from BB/ADC overdrive; if the envelope is still saturated one window later
+ * the next emergency drop takes the RF stage. */
 static uint8_t emergency_drop(const direct_gain_v3_t *v3)
 {
     const arc_gain_tuple_t *current = &v3->tuple[v3->current_gain];
-    if (current->rf_stage > 0u) {
-        for (unsigned g = 20u; g <= v3->table.max_index; ++g) {
-            const arc_gain_tuple_t *t = &v3->tuple[g];
-            if (t->rf_stage + 1u == current->rf_stage &&
-                t->bb_code == 1u && t->fine_code == 5u) return (uint8_t)g;
-        }
-    }
     if (current->bb_code > 1u) {
         unsigned lower_bb = (current->bb_code - 1u) / 2u;
         for (unsigned g = 20u; g <= v3->table.max_index; ++g) {
@@ -282,6 +279,13 @@ static uint8_t emergency_drop(const direct_gain_v3_t *v3)
             if (t->rf_stage == current->rf_stage &&
                 t->bb_code == lower_bb && t->fine_code == 5u)
                 return (uint8_t)g;
+        }
+    }
+    if (current->rf_stage > 0u) {
+        for (unsigned g = 20u; g <= v3->table.max_index; ++g) {
+            const arc_gain_tuple_t *t = &v3->tuple[g];
+            if (t->rf_stage + 1u == current->rf_stage &&
+                t->bb_code == 1u && t->fine_code == 5u) return (uint8_t)g;
         }
     }
     return adjacent_physical(v3, false);
@@ -564,6 +568,17 @@ uint8_t direct_gain_v3_tick(direct_gain_v3_t *v3,
         v3->virtual_gain_q8 = 0;
         v3->last_direction = 0;
         return start_write(v3, o, &prior, v3->table.max_index);
+    }
+    /* Saturation does not wait for a settling write. A window during settle
+     * may still hold pre-write samples, so this applies after an upward
+     * write (stale data would read lower, not saturated) or once the 300 us
+     * freshness floor has passed; the settling write's learning is dropped. */
+    if (saturated && v3->state == DG3_SETTLE &&
+        (v3->current_gain > v3->prior_gain ||
+         (o->observed_us >= v3->write_us &&
+          o->observed_us - v3->write_us >= 300u))) {
+        v3->before.p50 = 0u;
+        v3->state = DG3_VERIFY;
     }
     if (v3->state == DG3_SETTLE) {
         /* The freshness guard grows from prior settle measurements. The
