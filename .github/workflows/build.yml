@@ -161,6 +161,7 @@ jobs:
           /tmp/test_direct_gain_v2
           gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_direct_gain_v3.c main/direct_gain_v3.c main/arc_phy.c -o /tmp/test_direct_gain_v3
           /tmp/test_direct_gain_v3
+          python3 tools/analyze_agc_words.py --self-test
           gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_rx_auto_lab.c main/rx_auto_lab.c -o /tmp/test_rx_auto_lab
           /tmp/test_rx_auto_lab
           gcc -std=c11 -Wall -Wextra -Werror -Imain tools/test_arc_v3.c main/arc_v3_controller.c -o /tmp/test_arc_v3
