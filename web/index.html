@@ -1,72 +1,58 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>C5VRX Firmware Flasher</title>
-  <link rel="icon" type="image/jpeg" href="assets/c5vrx-logo.jpg">
-  <link rel="stylesheet" href="style.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C5VRX Web Flasher</title>
+<meta name="description" content="Flash C5VRX firmware and use the receiver USB serial terminal.">
+<link rel="icon" type="image/jpeg" href="assets/c5vrx-logo.jpg">
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <img src="assets/c5vrx-logo.jpg" alt="C5VRX" class="logo">
-    </div>
+<a class="skip-link" href="#main">Skip to tools</a>
+<header>
+<div class="header-inner">
+<a href="https://twotoz.github.io/C5VRX/" aria-label="C5VRX home">
+<img class="logo" src="assets/c5vrx-logo.jpg" alt="C5VRX">
+</a>
+<div class="links">
+<a href="https://discord.gg/3YNgJRHmzD" target="_blank" rel="noopener noreferrer">Discord</a>
+<a href="https://github.com/Twotoz/C5VRX" target="_blank" rel="noopener noreferrer">GitHub</a>
+</div>
+</div>
+</header>
+<main id="main">
+<h1>Web flasher</h1>
+<div id="unsupportedWarning" class="warning" role="status" style="display:none">USB connection requires a desktop browser with Web Serial support, such as Chrome or Edge. You can still browse firmware here.</div>
+<nav aria-label="Device tools">
+<button class="view-button active" id="firmwareTab" aria-pressed="true">Firmware</button>
+<button class="view-button" id="terminalTab" aria-pressed="false">Terminal</button>
+</nav>
+<section id="firmwareView" aria-label="Firmware">
+<div class="panel">
 
-    <div class="top-actions">
-      <a href="https://discord.gg/3YNgJRHmzD" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" title="Join C5VRX Discord">
-        <svg class="icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-          <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.929 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.894.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
-        </svg>
-        Discord
-      </a>
-      <a href="https://github.com/Twotoz/C5VRX" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" title="View Source on GitHub">
-        <svg class="icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-          <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
-        </svg>
-        GitHub
-      </a>
-      <button id="btnConnect" class="btn btn-primary">
-        <span class="indicator indicator-off" id="portIndicator"></span>
-        <span id="btnConnectText">Connect Device</span>
-      </button>
-    </div>
-  </header>
-
-  <div id="unsupportedWarning" class="alert alert-danger" style="display: none;">
-    <strong>Browser Unsupported:</strong> Web Serial API is not available. Please use <strong>Google Chrome</strong>, <strong>Microsoft Edge</strong>, or <strong>Brave</strong> on Desktop.
-  </div>
-
-  <main class="container">
-    <div class="grid">
-      <!-- Left Column: Firmware Selection -->
-      <div class="card">
-        <div class="card-header">
-          <h2>1. Firmware Selection</h2>
-          <span class="badge" id="sourceBadge">GitHub</span>
-        </div>
-        <div class="card-body">
-          <div class="segmented-control">
-            <button id="tabGithub" class="tab-btn active">Releases</button>
-            <button id="tabPr" class="tab-btn tab-btn-pr">PR Builds</button>
-            <button id="tabLocal" class="tab-btn">Local File</button>
+          <div class="sources" role="group" aria-label="Firmware source">
+            <button id="tabGithub" aria-pressed="true" class="source-button active">Releases</button>
+            <button id="tabPr" aria-pressed="false" class="source-button">PR Builds</button>
+            <button id="tabLocal" aria-pressed="false" class="source-button">Local File</button>
           </div>
 
           <!-- GitHub Source Pane -->
           <div id="paneGithub" class="tab-pane active">
-            <div class="form-group">
-              <label for="selectRelease">Select Version:</label>
-              <div class="input-with-button">
+            <div class="field">
+              <label for="selectRelease">Version</label>
+              <div class="select-row">
                 <select id="selectRelease" class="form-control">
-                  <option value="">Fetching releases from GitHub...</option>
+                  <option value="">Loading releases…</option>
                 </select>
-                <button id="btnRefreshReleases" class="btn btn-secondary btn-icon" title="Refresh releases">
+                <button id="btnRefreshReleases" class="action" title="Refresh releases">
                   Refresh
                 </button>
               </div>
             </div>
 
-            <div id="releaseDetails" class="info-box" style="display: none;">
+            <details class="release-metadata"><summary>Release details</summary>
+<div id="releaseDetails" class="info-box" style="display: none;">
               <div class="info-row">
                 <span class="info-label">Release:</span>
                 <span class="info-value" id="infoReleaseName">-</span>
@@ -84,12 +70,13 @@
                 <span class="info-value" id="infoReleaseAssets">-</span>
               </div>
             </div>
+</details>
 
-            <div class="form-group">
-              <label for="selectPackageType">Firmware Package:</label>
+            <div class="field">
+              <label for="selectPackageType">Package</label>
               <select id="selectPackageType" class="form-control">
-                <option value="merged">Full Firmware (Bootloader + Partitions + App @ 0x0)</option>
-                <option value="app_only">App Only (c5vrx3.bin @ 0x10000)</option>
+                <option value="merged">Full firmware</option>
+                <option value="app_only">App only</option>
               </select>
             </div>
           </div>
@@ -97,23 +84,26 @@
           <!-- Experimental PR Build Pane -->
           <div id="panePr" class="tab-pane">
             <div id="prBuildWarning" class="warning-box">
-              <strong>⚠ Experimental / unmerged firmware <span id="prBuildNumber"></span></strong>
+              <strong>⚠ Experimental / unmerged firmware <span id="prBuildNumber">
+</span>
+</strong>
               <span>PR builds are temporary test firmware generated by GitHub Actions. They may be unstable, fail to boot, reset settings, or produce broken video. Flash only when you intentionally want to test a pull request.</span>
             </div>
 
-            <div class="form-group">
-              <label for="selectPrBuild">Select Pull Request Build:</label>
-              <div class="input-with-button">
+            <div class="field">
+              <label for="selectPrBuild">Pull request</label>
+              <div class="select-row">
                 <select id="selectPrBuild" class="form-control">
-                  <option value="">Fetching PR builds from GitHub...</option>
+                  <option value="">Loading PR builds…</option>
                 </select>
-                <button id="btnRefreshPrBuilds" class="btn btn-secondary btn-icon" title="Refresh PR builds">
+                <button id="btnRefreshPrBuilds" class="action" title="Refresh PR builds">
                   Refresh
                 </button>
               </div>
             </div>
 
-            <div id="prBuildDetails" class="info-box" style="display: none;">
+            <details class="release-metadata"><summary>Build details</summary>
+<div id="prBuildDetails" class="info-box" style="display: none;">
               <div class="info-row">
                 <span class="info-label">Build:</span>
                 <span class="info-value" id="infoPrBuildName">-</span>
@@ -131,12 +121,13 @@
                 <span class="info-value" id="infoPrBuildAssets">-</span>
               </div>
             </div>
+</details>
 
-            <div class="form-group">
-              <label for="selectPrPackageType">Firmware Package:</label>
+            <div class="field">
+              <label for="selectPrPackageType">Package</label>
               <select id="selectPrPackageType" class="form-control">
-                <option value="merged">Full Firmware (Bootloader + Partitions + App @ 0x0)</option>
-                <option value="app_only">App Only (c5vrx3.bin @ 0x10000)</option>
+                <option value="merged">Full firmware</option>
+                <option value="app_only">App only</option>
               </select>
             </div>
           </div>
@@ -146,8 +137,8 @@
             <div class="dropzone" id="dropzone">
               <p>Drag & Drop firmware binary (<strong>.bin</strong>) here</p>
               <span class="text-muted">or</span>
-              <input type="file" id="inputLocalFile" accept=".bin" class="file-input">
-              <label for="inputLocalFile" class="btn btn-secondary">Browse File</label>
+              <button type="button" id="btnBrowseFile" class="action">Browse File</button>
+              <input type="file" id="inputLocalFile" accept=".bin" class="file-input" tabindex="-1">
             </div>
 
             <div id="localFileDetails" class="info-box" style="display: none; margin-top: 12px;">
@@ -159,7 +150,7 @@
                 <span class="info-label">Size:</span>
                 <span class="info-value" id="localFileSize">-</span>
               </div>
-              <div class="form-group" style="margin-top: 8px;">
+              <div class="field" style="margin-top: 8px;">
                 <label for="inputFlashOffset">Flash Offset:</label>
                 <input type="text" id="inputFlashOffset" class="form-control" value="0x0" placeholder="0x0 or 0x10000">
                 <small class="text-muted">Use <code>0x0</code> for merged binaries, <code>0x10000</code> for standalone app binary.</small>
@@ -169,95 +160,220 @@
 
           <!-- Advanced Flash Options -->
           <details class="advanced-box">
-            <summary>Advanced Options</summary>
-            <div class="form-group" style="margin-top: 10px;">
-              <label for="selectBaud">Flashing Baud Rate:</label>
+            <summary>Advanced options</summary>
+            <div class="field" style="margin-top: 10px;">
+              <label for="selectBaud">Flash speed</label>
               <select id="selectBaud" class="form-control">
                 <option value="460800" selected>460,800 (Fast & Reliable)</option>
                 <option value="115200">115,200 (Safe Fallback)</option>
                 <option value="921600">921,600 (Maximum Speed)</option>
               </select>
             </div>
-            <div class="form-group">
-              <label class="checkbox-label">
+            <div class="field">
+              <label class="check">
                 <input type="checkbox" id="chkEraseAll">
-                <span>Erase entire flash before flashing</span>
+                <span>Erase flash before installing</span>
               </label>
             </div>
           </details>
 
-          <!-- Flash Trigger -->
-          <button id="btnFlash" class="btn btn-primary btn-block btn-lg" disabled>
-            Flash Firmware
-          </button>
-        </div>
-      </div>
+          <div class="flash-actions">
+<button id="btnConnect" class="action">
+<span id="btnConnectText">Connect device</span>
+</button>
+<button id="btnFlash" class="action primary" disabled>Flash firmware</button>
+</div>
+<p id="statStatus" class="device-status" role="status">No device connected</p>
+<div id="progressContainer" class="progress-container" aria-live="polite" style="display:none">
+<div class="progress-labels">
+<span id="progressStatusText">Preparing…</span>
+<span id="progressPercentText">0%</span>
+</div>
+<div class="progress-track">
+<div id="progressBar" class="progress-bar" style="width:0%">
+</div>
+</div>
+</div>
+<details id="flashLog" class="flash-log">
+<summary>Flash log</summary>
+<button id="btnClearConsole" class="action">Clear</button>
+<pre id="consoleOutput" class="terminal-output" tabindex="0" aria-label="Flash log">
+</pre>
+</details>
+</div>
+<details class="help">
+<summary>Connection help</summary>
+<p>Use a USB data cable to connect your XIAO ESP32-C5. Choose its serial port when connecting.</p>
+<p>If it fails to connect, hold BOOT, tap RESET, then release BOOT.</p>
+<p>USB flashing requires a desktop browser with Web Serial support, such as Chrome or Edge.</p>
+</details>
+</section>
+<section id="terminalView" aria-label="Serial terminal" hidden>
+<div class="shortcuts">
+<div class="command-group">
+<h2>Receiver</h2>
+<div class="command-buttons">
+<button type="button" class="command-button" data-command="c" title="Command: c" disabled>Next channel <kbd>c</kbd>
+</button>
+<button type="button" class="command-button" data-command="C" title="Command: C" disabled>Next band <kbd>C</kbd>
+</button>
+<button type="button" class="command-button" data-command="o" title="Command: o" disabled>Menu <kbd>o</kbd>
+</button>
+<button type="button" class="command-button" data-command="v" title="Command: v" disabled>Video standard <kbd>v</kbd>
+</button>
+</div>
+</div>
+<div class="command-group">
+<h2>Diagnostics</h2>
+<div class="command-buttons">
+<button type="button" class="command-button" data-command="d" title="Command: d" disabled>Status <kbd>d</kbd>
+</button>
+<button type="button" class="command-button" data-command="p" title="Command: p" disabled>Snapshot <kbd>p</kbd>
+</button>
+<button type="button" class="command-button" data-command="l" title="Command: l" disabled>Mark lag <kbd>l</kbd>
+</button>
+<button type="button" class="command-button" data-command="q" title="Command: q" disabled>Quiet logs <kbd>q</kbd>
+</button>
+</div>
+</div>
+<details class="shortcut-details">
+<summary>Gain, frequency & menu controls</summary>
+<div class="command-group">
+<h2>Gain</h2>
+<div class="command-buttons">
+<button type="button" class="command-button" data-command="D" title="Command: D" disabled>Direct gain <kbd>D</kbd>
+</button>
+<button type="button" class="command-button" data-command="N" data-confirm="Toggle native AGC and reboot the receiver?" title="Command: N" disabled>Native AGC toggle <kbd>N</kbd>
+</button>
+<button type="button" class="command-button" data-command="a" title="Command: a" disabled>Active AGC <kbd>a</kbd>
+</button>
+<button type="button" class="command-button" data-command="s" title="Command: s" disabled>Shadow AGC <kbd>s</kbd>
+</button>
+<button type="button" class="command-button" data-command="m" title="Command: m" disabled>Manual gain <kbd>m</kbd>
+</button>
+<button type="button" class="command-button" data-command="-" title="Command: -" disabled>Gain − <kbd>-</kbd>
+</button>
+<button type="button" class="command-button" data-command="+" title="Command: +" disabled>Gain + <kbd>+</kbd>
+</button>
+</div>
+</div>
+<div class="command-group">
+<h2>Frequency</h2>
+<div class="command-buttons">
+<button type="button" class="command-button" data-command="f" title="Command: f" disabled>Cycle AFC mode <kbd>f</kbd>
+</button>
+<button type="button" class="command-button" data-command="," title="Command: ," disabled>−50 kHz <kbd>,</kbd>
+</button>
+<button type="button" class="command-button" data-command="." title="Command: ." disabled>+50 kHz <kbd>.</kbd>
+</button>
+<button type="button" class="command-button" data-command="0" title="Command: 0" disabled>Reset offset <kbd>0</kbd>
+</button>
+</div>
+</div>
+<div class="command-group">
+<h2>Menu navigation</h2>
+<div class="command-buttons">
+<button type="button" class="command-button" data-command="n" title="Command: n" disabled>Next item <kbd>n</kbd>
+</button>
+<button type="button" class="command-button" data-command="&#13;" title="Command: Enter" disabled>Select item <kbd>Enter</kbd>
+</button>
+<button type="button" class="command-button" data-command="O" title="Command: O" disabled>BOOT menu toggle <kbd>O</kbd>
+</button>
+</div>
+</div>
+</details>
+<details class="shortcut-details">
+<summary>Diagnostics & experimental tools</summary>
+<div class="command-group">
+<h2>Measurements</h2>
+<div class="command-buttons">
+<button type="button" class="command-button" data-command="T" title="Command: T" disabled>AGC registers <kbd>T</kbd>
+</button>
+<button type="button" class="command-button" data-command="Q" title="Command: Q" disabled>Raw IQ <kbd>Q</kbd>
+</button>
+<button type="button" class="command-button" data-command="E" title="Command: E" disabled>Phase8 envelope <kbd>E</kbd>
+</button>
+<button type="button" class="command-button" data-command="t" title="Command: t" disabled>Timer inventory <kbd>t</kbd>
+</button>
+<button type="button" class="command-button" data-command="H" title="Command: H" disabled>PHY oracle <kbd>H</kbd>
+</button>
+<button type="button" class="command-button" data-command="r" title="Command: r" disabled>Reset lag counters <kbd>r</kbd>
+</button>
+</div>
+</div>
+<div class="command-group">
+<h2>Experimental</h2>
+<div class="command-buttons">
+<button type="button" class="command-button" data-command="g" title="Command: g" disabled>Gain sweep / abort <kbd>g</kbd>
+</button>
+<button type="button" class="command-button" data-command="G" title="Command: G" disabled>RF-stage sweep <kbd>G</kbd>
+</button>
+<button type="button" class="command-button" data-command="W" title="Command: W" disabled>Bandwidth probe <kbd>W</kbd>
+</button>
+<button type="button" class="command-button" data-command="F" title="Command: F" disabled>FFT probe <kbd>F</kbd>
+</button>
+<button type="button" class="command-button" data-command="A" title="Command: A" disabled>Frequency probe <kbd>A</kbd>
+</button>
+<button type="button" class="command-button" data-command="U" title="Command: U" disabled>RX auto lab <kbd>U</kbd>
+</button>
+<button type="button" class="command-button" data-command="S" title="Command: S" disabled>TX self-noise <kbd>S</kbd>
+</button>
+<button type="button" class="command-button" data-command="R" title="Command: R" disabled>RSSI probe <kbd>R</kbd>
+</button>
+<button type="button" class="command-button" data-command="b" title="Command: b" disabled>Quiet baseline <kbd>b</kbd>
+</button>
+<button type="button" class="command-button" data-command="X" title="Command: X" disabled>Cycle RX profile <kbd>X</kbd>
+</button>
+<button type="button" class="command-button" data-command="I" title="Command: I" disabled>Direct gain V1 <kbd>I</kbd>
+</button>
+<button type="button" class="command-button" data-command="Y" title="Command: Y" disabled>ARC V3 <kbd>Y</kbd>
+</button>
+<button type="button" class="command-button" data-command="e" title="Command: e" disabled>Sample edge <kbd>e</kbd>
+</button>
+<button type="button" class="command-button" data-command="K" data-confirm="Erase stored PHY calibration and reboot the receiver?" title="Command: K" disabled>Fresh calibration + reboot <kbd>K</kbd>
+</button>
+</div>
+</div>
+</details>
+</div>
+<div class="panel terminal-panel">
+<div class="terminal-toolbar">
+<div class="terminal-controls">
+<label for="terminalBaud">Baud</label>
+<select id="terminalBaud">
+<option>115200</option>
+<option>460800</option>
+<option>921600</option>
+</select>
+<button class="action" id="btnTerminalConnect">Connect</button>
+</div>
+<button class="action" id="clear">Clear</button>
+</div>
+<pre class="terminal-output" id="output" tabindex="0" aria-label="Serial output">Connect a device to view serial output.</pre>
+<form class="command-row" id="commandForm">
+<input id="commandInput" placeholder="Send a command" aria-label="Command" disabled autocomplete="off" autocapitalize="off" spellcheck="false">
+<button id="btnSendCommand" class="action" disabled>Send</button>
+</form>
+</div>
+<div class="terminal-options">
+<label class="check">
+<input id="autoScroll" type="checkbox" checked>Auto-scroll</label>
+<div class="ending">
+<label for="ending">Line ending</label>
+<select id="ending">
+<option value="">None</option>
+<option value="lf">LF</option>
+<option value="crlf">CR + LF</option>
+</select>
+</div>
+</div>
+<p id="terminalStatus" class="hint" role="status">No device connected</p>
+<p class="hint">Disconnect the terminal before flashing firmware. Shortcut buttons send a single command byte.</p>
+</section>
 
-      <!-- Right Column: Target Device & Instructions -->
-      <div class="card">
-        <div class="card-header">
-          <h2>2. Target Device & Log</h2>
-          <span class="badge badge-secondary" id="chipBadge">No Device</span>
-        </div>
-        <div class="card-body">
-          <div class="device-info-grid">
-            <div class="stat-box">
-              <span class="stat-label">Chip</span>
-              <span class="stat-value" id="statChip">ESP32-C5</span>
-            </div>
-            <div class="stat-box">
-              <span class="stat-label">MAC Address</span>
-              <span class="stat-value" id="statMac">—</span>
-            </div>
-            <div class="stat-box">
-              <span class="stat-label">Flash Size</span>
-              <span class="stat-value" id="statFlash">8 MB</span>
-            </div>
-            <div class="stat-box">
-              <span class="stat-label">Status</span>
-              <span class="stat-value" id="statStatus">Disconnected</span>
-            </div>
-          </div>
-
-          <!-- Quick Hardware Guide -->
-          <div class="guide-box">
-            <h4>XIAO ESP32-C5 Connection Guide:</h4>
-            <ol>
-              <li>Plug your Seeed Studio XIAO ESP32-C5 into your PC via USB.</li>
-              <li>Click <strong>Connect Device</strong> above and select the USB Serial port.</li>
-              <li><em>If the port times out or fails to connect:</em> Hold the <strong>BOOT (B)</strong> button, tap <strong>RESET (R)</strong>, and release <strong>BOOT</strong>.</li>
-            </ol>
-          </div>
-
-          <!-- Progress Bar -->
-          <div class="progress-container" id="progressContainer" style="display: none;">
-            <div class="progress-labels">
-              <span id="progressStatusText">Flashing...</span>
-              <span id="progressPercentText">0%</span>
-            </div>
-            <div class="progress-track">
-              <div class="progress-bar" id="progressBar" style="width: 0%;"></div>
-            </div>
-          </div>
-
-          <!-- Console Output -->
-          <div class="console-header">
-            <span>Terminal Output</span>
-            <button id="btnClearConsole" class="btn btn-secondary btn-sm">Clear</button>
-          </div>
-          <pre id="consoleOutput" class="console"></pre>
-        </div>
-      </div>
-    </div>
-  </main>
-
-  <footer class="footer">
-    <p>
-      <strong>C5VRX</strong> — Open Source 5.8 GHz Analog FPV Receiver for Seeed Studio XIAO ESP32-C5.
-      Licensed under GPL-3.0.
-    </p>
-  </footer>
-
-  <script type="module" src="app.js"></script>
+</main>
+<footer>C5VRX · GPL-3.0</footer>
+<script type="module" src="app.js">
+</script>
 </body>
 </html>
