@@ -789,3 +789,12 @@ navigator.serial?.addEventListener('disconnect', async (event) => {
   if (event.target === serialConsole.port) await serialConsole.disconnect();
   if (event.target === port && !isFlashing && !isConnecting) await disconnectDevice();
 });
+
+
+// Keep docs visible on desktop and collapsible on smaller screens.
+const docsBreakpoint = window.matchMedia('(min-width:801px)');
+const docsNav = document.getElementById('docsNav');
+docsNav.open = docsBreakpoint.matches;
+docsBreakpoint.addEventListener('change', (event) => {
+  docsNav.open = event.matches;
+});
