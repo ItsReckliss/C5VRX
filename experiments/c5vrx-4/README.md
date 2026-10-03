@@ -2,7 +2,7 @@
 
 One isolated ESP32-C5 receiver project, assembled from the C5VRX-3 range/control
 work and the three-bundle Phase8 Unwrap75 experiments. It extends **C5VRX by
-Twotoz and the C5VRX contributors**, including Twotoz's receiver research.
+Twotoz and the C5VRX contributors** and their receiver research.
 Source: https://github.com/Twotoz/C5VRX · official website and Discord invite:
 https://twotoz.github.io/C5VRX/. Existing author notices and GPL-3.0-only apply.
 

@@ -29,4 +29,5 @@ keep it experimental/off by default until live arbitration, physical timing and
 FIFO continuity are demonstrated. H/V regeneration and IQ DC correction remain
 absent. Tests/compiler results are not range/HDZero
 or sample-gapless RF proof. Run verify.py and the exact-head IDF build before
-requesting merge approval; merge only after Leon explicitly approves.
+requesting merge approval; merge only after the project maintainer explicitly
+approves.

@@ -21,7 +21,7 @@ repository is currently available for proprietary or dual licensing.
 
 The joined Git histories contain these distinct non-bot author identities:
 
-- `Twotoz <leonbeekveldt@gmail.com>`
+- `Twotoz` (personal email omitted)
 - `ItsReckliss <41764424+ItsReckliss@users.noreply.github.com>`
 - `root <root@vmi3489225.contaboserver.net>`
 

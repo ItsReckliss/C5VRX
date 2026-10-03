@@ -2,7 +2,7 @@ from pathlib import Path
 import math
 import numpy as np
 
-ROOT = Path("C:/Users/leonb/Twotoz/C5VRX-issue11-output")
+ROOT = Path(__file__).resolve().parent.parent
 
 TAU = 2.0 * math.pi
 PEDESTAL = 20

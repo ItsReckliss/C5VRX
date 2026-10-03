@@ -10,9 +10,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
 PACKAGES = ROOT / "packages"
-DESKTOP = Path("C:/Users/leonb/Desktop")
+DESKTOP = Path.home() / "Desktop"
 DESKTOP_PACKAGES = DESKTOP / "packages"
-STAGE_DIR = Path("C:/Users/leonb/Twotoz/C5VRX/_package_stage")
+STAGE_DIR = ROOT / "_package_stage"
 
 bootloader = BUILD / "bootloader/bootloader.bin"
 ptable = BUILD / "partition_table/partition-table.bin"

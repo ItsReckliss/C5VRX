@@ -3,8 +3,9 @@
 This contribution extends C5VRX by Twotoz and the C5VRX contributors; the official
 website also carries the Discord invite: https://twotoz.github.io/C5VRX/.
 Base main is `b8d32b90f479feff7fbb34e6ca01cc9ba2d0d697`. The PR is deliberately
-directory-only and must not merge until Leon approves it. Older PRs remain open;
-this integration neither closes issues nor silently replaces their evidence.
+directory-only and must not merge until the project maintainer approves it.
+Older PRs remain open; this integration neither closes issues nor silently
+replaces their evidence.
 
 ## Donor decisions
 

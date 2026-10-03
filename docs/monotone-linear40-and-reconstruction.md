@@ -25,7 +25,7 @@ Y[2k+1] = round((Golden[k] + Golden[k+1]) / 2) // Strictly bounded midpoint
 ```
 
 ### Mathematical Invariants & Verification Oracle
-Implemented in [`tools/test_linear40_monotone.py`](file:///C:/Users/leonb/Twotoz/C5VRX-issue11-output/tools/test_linear40_monotone.py):
+Implemented in [`tools/test_linear40_monotone.py`](../legacy/c5vrx2/tools/test_linear40_monotone.py):
 
 1. **Bit-Exact Preservation**:
    $$\forall k, \quad Y[2k] = \text{Golden}[k]$$

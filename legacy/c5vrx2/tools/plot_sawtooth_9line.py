@@ -97,6 +97,6 @@ plt.grid(True, linestyle='--', alpha=0.5)
 plt.legend(fontsize=11, loc='upper left')
 
 plt.tight_layout()
-out_png = Path('C:/Users/leonb/.gemini/antigravity-cli/brain/d53f0852-6c10-48a8-b452-306daa49e236/hsync_edge_vs_mod9.png')
+out_png = Path('hsync_edge_vs_mod9.png')
 plt.savefig(out_png, dpi=150)
 print('Saved plot to:', out_png)

@@ -110,7 +110,7 @@ This investigation yielded five foundational, hardware-verified conclusions:
 
 The authoritative production configuration on `main` is:
 - **RF Tap:** `s_iq_diag[] = {6, 7, 8, 9, 16, 17, 18, 19}` (Full `Q[9:6]` & `I[9:6]` with sign bits intact).
-- **Demodulator:** `Phase5c` ([fm_phase5_360.bsasm](file:///C:/Users/leonb/C5VRX-main-safe/main/fm_phase5_360.bsasm)):
+- **Demodulator:** `Phase5c` ([fm_phase5_360.bsasm](../main/fm_phase5_360.bsasm)):
   - Exact Golden Phase5 1:1 mapping for all legitimate video transitions ($|\Delta\theta| \le 90^\circ$).
   - Static Squelch (clamping to pedestal 20) for impossible delta transitions ($|\Delta\theta| \ge 123.75^\circ$) to eliminate salt-and-pepper noise flits.
 - **AGC:** Direct Gain with damped slew rate and calibrated feed-forward table.
