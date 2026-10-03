@@ -5,6 +5,8 @@ target_bitscrambler_add_src("${PROJECT_DIR}/c5vrx4_phase8_static.bsasm")
 target_bitscrambler_add_src("${PROJECT_DIR}/c5vrx4_phase8_history.bsasm")
 target_bitscrambler_add_src("${PROJECT_DIR}/c5vrx4_phase8_static_legacy.bsasm")
 target_bitscrambler_add_src("${PROJECT_DIR}/c5vrx4_phase8_history_legacy.bsasm")
+target_bitscrambler_add_src("${PROJECT_DIR}/c5vrx4_phase8_static_cvbs150.bsasm")
+target_bitscrambler_add_src("${PROJECT_DIR}/c5vrx4_phase8_history_cvbs150.bsasm")
 target_sources(${COMPONENT_LIB} PRIVATE "${PROJECT_DIR}/cvbs_monitor.c")
 
 target_sources(${COMPONENT_LIB} PRIVATE "${PROJECT_DIR}/lanes.c")

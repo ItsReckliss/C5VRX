@@ -23,6 +23,7 @@ void c5v4_level_hw_unlock(void) { xSemaphoreGiveRecursive(access_lock); }
 static c5v4_level_t servo;
 static uint16_t original[1024];
 static bool ready;
+static bool blocked;
 static uint32_t writes, faults;
 static uint16_t read_entry(unsigned index)
 {
@@ -43,7 +44,7 @@ void c5v4_level_hw_prepare(void)
 {
     ready = false;
     c5v4_level_init(&servo);
-    if (!c5vrx4_level_enabled() || c5vrx4_cvbs_legacy_enabled()) return;
+    if (blocked || !c5vrx4_level_enabled() || c5vrx4_cvbs_legacy_enabled()) return;
     if (bitscrambler_ll_get_lut_width(&BITSCRAMBLER, BITSCRAMBLER_DIR_TX) != 1) return;
     /* The headers disagree on whether host address units follow LUT width.
      * A stopped-engine differential probe verifies all 1024 halfword views,
@@ -59,10 +60,24 @@ void c5v4_level_hw_prepare(void)
     for (unsigned i = 0; i < 1024; ++i)
         if (read_entry(i) != original[i]) ok = false;
     ready = ok;
+    if (ok) {
+        /* Seed from the loaded even plane (M may select CVBS150). */
+        uint8_t loaded[256];
+        for (unsigned i = 0; i < 256; ++i) loaded[i] = (uint8_t)(original[i] & 63u);
+        c5v4_level_seed(&servo, loaded);
+    }
     if (!ok) ++faults;
     printf("C5V4_LEVEL startup_probe=%s live_arbitration=unproven\n", ok ? "pass" : "refused");
 }
-bool c5v4_level_hw_ready(void) { return ready; }
+bool c5v4_level_hw_ready(void)
+{ c5v4_level_hw_lock(); bool value=ready; c5v4_level_hw_unlock(); return value; }
+unsigned c5v4_level_hw_period(uint32_t context, uint64_t now)
+{
+    c5v4_level_hw_lock();
+    unsigned period = c5v4_level_period(&servo, context, now);
+    c5v4_level_hw_unlock();
+    return period;
+}
 void c5v4_level_hw_observe(const c5v4_cvbs_stats_t *stats, bool fresh,
                          uint32_t context, uint64_t now)
 {
@@ -72,14 +87,16 @@ void c5v4_level_hw_observe(const c5v4_cvbs_stats_t *stats, bool fresh,
         ready = false; ++faults; goto done;
     }
     if (!c5v4_level_observe(&servo, stats, fresh, context, now)) goto done;
-    for (unsigned bank = 0; bank < 4; bank += 2) {
-        for (unsigned i = 0; i < 256; ++i) {
+    /* Write the matching planes next to one another, shortening the time
+     * each single entry disagrees; still not an atomic hardware bank swap. */
+    for (unsigned i = 0; i < 256; ++i) {
+        for (unsigned bank = 0; bank < 4; bank += 2) {
             unsigned index = bank * 256 + i;
             uint16_t next = c5v4_level_word(original[index], servo.codes[i]);
             if (next != original[index]) {
                 write_entry(index, next);
                 if (read_entry(index) != next) {
-                    ready = false; ++faults; goto done;
+                    ready = false; blocked = true; ++faults; goto done;
                 }
                 original[index] = next; ++writes;
             }
@@ -92,14 +109,20 @@ void c5v4_level_hw_invalidate(void)
 {
     c5v4_level_hw_lock(); servo.good = 0; c5v4_level_hw_unlock();
 }
+void c5v4_level_hw_transport_fault(void)
+{
+    c5v4_level_hw_lock();
+    if (ready && servo.updates) { ready = false; blocked = true; ++faults; }
+    c5v4_level_hw_unlock();
+}
 void c5v4_level_hw_print(void)
 {
     c5v4_level_hw_lock();
     printf("C5V4_LEVEL requested=%u ready=%u experimental=1 updates=%lu writes=%lu faults=%lu "
-           "good=%u refused=%u span_bins=%d blank_bins=%d target_sync_mv=0 target_blank_mv=300 "
-           "loss=hold sync_regeneration=0 atomic_update=0\n",
+           "good=%u refused=%u span_bins=%d blank_bins=%d target_sync_mv=10 target_depth_mv=%u "
+           "period_us=20000 recovery_period_us=5000 recovery_us=100000 slew_uv=32000 blocked=%u loss=hold sync_regeneration=0 atomic_update=0\n",
            c5vrx4_level_enabled(), ready, (unsigned long)servo.updates,
            (unsigned long)writes, (unsigned long)faults, servo.good, servo.refusals,
-           servo.span, servo.blank);
+           servo.span, servo.blank, servo.target_depth_mv, blocked);
     c5v4_level_hw_unlock();
 }

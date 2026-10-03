@@ -9,3 +9,6 @@ void c5v4_level_hw_lock(void);
 void c5v4_level_hw_unlock(void);
 void c5v4_level_hw_stop(void);
 void c5v4_level_hw_invalidate(void);
+/* Latch off after a transport fault following live updates, until reboot. */
+void c5v4_level_hw_transport_fault(void);
+unsigned c5v4_level_hw_period(uint32_t context, uint64_t now_us);

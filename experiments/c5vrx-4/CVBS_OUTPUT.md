@@ -5,14 +5,61 @@ resistor-DAC and sync investigations. This build combines PR #146's detector
 and fixed-ultrafine comparison, PR #154's PHY ownership/range-race fixes,
 and main's versioned alpha/PR publication. No Phase5 rollback is included.
 
-## Implemented live change
+## Standard-amplitude default (STD150)
+
+Leon reported that some goggles did not detect the small Phase8 AV signal.
+The original PR164 HR100 mapping traded amplitude for offset headroom: nominal
+sync depth 0.200 V and sync-to-white 0.667 V. Decoder AGC is not a sufficient
+compatibility guarantee, so STD150 replaces HR100 in mode 0, including existing
+mode-0 NVS settings. No settings erase is required. Explicit legacy/CVBS150
+selections remain unchanged.
+
+The connector target under **one 75-ohm load** is approximately 1.000 V from
+sync tip to reference white, with 0.286 V NTSC / 0.300 V PAL sync depth and
+0.714 / 0.700 V porch-to-white. This is a waveform span, not a required absolute
+DC position; chroma peaks may extend beyond reference white. Sources:
+
+- Analog Devices, Understanding Analog Video Signals, amplitude table:
+  https://www.analog.com/en/resources/technical-articles/understanding-analog-video-signals.html
+- Texas Instruments, Video Designs Using High-Speed Amplifiers, Appendix B:
+  https://www.ti.com/lit/pdf/sloa057
+- Analog Devices, sync-depth explanation:
+  https://ez.analog.com/video/f/q-a/6845/adv7181d-how-to-clamp-and-sync
+
+STD150 uses 0.310 V blanking and 0.150 V/MHz. Under the existing assumed VTX
+reference (-2 MHz sync, +4.667 MHz white), targets are 0.010 V sync,
+0.310 V porch, 1.010 V white: 0.300 V sync depth and 1.000 V sync-to-white.
+This is 50% more amplitude than HR100; static/history phase decoding and all
+three bundles remain unchanged. Six-bit rounding and the real VTX deviation
+mean these are targets, not measured compliance for every PAL/NTSC camera.
+
+The existing resistor model reaches only about 1.02 V with its 200-ohm shunt
+and one 75-ohm receiver. Thus full amplitude leaves only about 10 mV at each
+rail; it cannot also provide HR100's 2.2-MHz offset tolerance. Synthetic CFO
+tests explicitly retain this limitation. A wrong carrier centre must be
+corrected by tuning/validated AFC, rather than making all video smaller.
+No automatic AFC or unverified live LUT servo is enabled by this fix.
+A wider physical output range/buffer is needed for substantial rail margin
+and colour overshoot at the full amplitude; no hardware change is assumed.
+
+Measure at the goggle connector with a high-impedance scope while the goggles
+supply the single 75-ohm load, or use one 75-ohm scope termination without the
+goggles. A second 75-ohm termination reduces the amplitude and invalidates the
+calibration. Do not calibrate against an unloaded output either.
+
+`M` cycles STD150 -> CVBS150 -> LEGACY_FULL. Mode 0 is STD150, 1 remains
+legacy, and 2 remains the original floor-referenced CVBS150 comparison.
+The sync-referenced `u` servo is now enabled by default and refines this baseline
+when valid sync is measured; disable it for a fixed-transfer M comparison.
+
+## Original CVBS150 change
 
 The detector's phase range no longer sets the video-output slope. STATIC and
 HISTORY retain their original phase decode, quadrant trajectory decisions,
 counter/parity routing, 3 bundles, IQ40M, and [D,D,D] DAC40M / unique13.333M.
 Only the low six DAC bits of the two even LUT planes change.
 
-The default CVBS150 transfer uses:
+The CVBS150 transfer (original floor-referenced comparison) uses:
 
     frequency_hz = delta_bins / (256 * 75e-9)
     target_volts = 0.300 + frequency_hz / 1e6 * 0.150
@@ -36,8 +83,9 @@ measured by this model.
 
 ## Controls
 
-- `M`: toggle CVBS150 / LEGACY_FULL and reboot. Default CVBS150. NVS key
-  `c5vrx4/cvbs_legacy` is independent of HISTORY and gain selection.
+- `M`: cycle STD150 / CVBS150 / LEGACY_FULL and reboot. Default STD150. NVS
+  key `c5vrx4/cvbs_legacy` (0 STD150, 1 legacy, 2 CVBS150) is independent of
+  HISTORY and gain selection.
 - `J`: eight bounded snapshots, 50 ms apart, on a temporary low-priority task.
   No permanent observer and no PHY, gain, LUT, DAC or ring writes.
 - `T`: report transfer, nominal/measured calibration, lane and gain ownership.
@@ -46,7 +94,7 @@ measured by this model.
 - `Z`: retains the fixed-ultrafine / baseline-lane reboot comparison.
 
 The mapping is selected at boot and every normal live restart/menu exit.
-Default has no live LUT writes; the opt-in `u` lab is documented in CVBS_LEVEL.md. The pinned IDF 6.0.2 `bitscrambler_load_lut()`
+Bounded DAC-only live LUT16 writes are enabled by default; see CVBS_LEVEL.md. The pinned IDF 6.0.2 `bitscrambler_load_lut()`
 changes the active LUT width to 32 bits while loading; `load_program()` halts
 execution. Neither is a safe seamless in-flight gain actuator for this LUT16
 program. Do not turn the diagnostic gain proposal into a live call to either.
@@ -103,7 +151,8 @@ HDZero picture/recording, PAL/NTSC, colour/detail, menu exit, native/V5 and
 power cycle. Observe FIFO faults and J copy/work timing. No measured range
 improvement, PAL/NTSC compliance or HDZero fix is claimed until then.
 
-**Default disabled:** the experimental `u` output gain/offset servo.
+**Default enabled:** sync-referenced `u` output gain/offset regulation; explicit
+opt-out, noise/loss hold, addressing refusal and fault latch are retained.
 **Not implemented:** automatic IQ DC correction,
 and H/V sync regeneration/coasting. These require a safe hardware actuator,
 verified IQ-centering evidence and full field/burst timing respectively. The

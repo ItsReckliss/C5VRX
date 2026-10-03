@@ -1,4 +1,5 @@
 # C5VRX-4: unwrapped Phase8 history legacy, 75 ns endpoint difference.
+# STD150 default: 0.310 V blanking, 0.150 V/MHz, nominal 1 V sync-to-white.
 # CVBS150: 0.300 V blanking, 0.150 V/MHz, saturating loaded DAC.
 # Legacy comparison retains the previous full-range amplitude transfer.
 # Three bundles consume 3 IQ bytes and emit [D,D,D] at 40 MHz.

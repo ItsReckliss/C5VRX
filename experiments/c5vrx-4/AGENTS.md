@@ -23,11 +23,12 @@ AFC uses adjacent raw Phase8 burst/clean-porch evidence and separate sticky vide
 TRACK; AUTO remains off until explicitly selected, with a bounded correction
 budget. Do not use gain HOLD alone as a video lock or a CFO-write permission.
 
-Default has no running LUT writes. The user-authorized opt-in `u` video-level
-lab uses a stopped-engine addressing probe and bounded DAC-only LUT16 writes;
-keep it experimental/off by default until live arbitration, physical timing and
-FIFO continuity are demonstrated. H/V regeneration and IQ DC correction remain
-absent. Tests/compiler results are not range/HDZero
-or sample-gapless RF proof. Run verify.py and the exact-head IDF build before
-requesting merge approval; merge only after the project maintainer explicitly
-approves.
+Leon explicitly authorized default-on sync-referenced CVBS level regulation on
+2026-10-04 in PR164. The adaptive 5/20-ms observer uses completed IQ snapshots and bounded
+DAC-only LUT16 updates after a stopped-engine addressing probe. Preserve the
+explicit u opt-out, noise/context/settle refusal, loss hold and fault latch. RF SETTLE and lane-history guards must precede
+qualification; recovery is bounded to 100 ms, slew to 32 mV in the loaded table.
+Live RAM arbitration, waveform seams and FIFO continuity remain physical gates;
+do not claim their proof from default-on authorization or host tests. H/V
+regeneration and IQ DC correction remain absent. Run verify.py and exact-head
+IDF CI before requesting merge approval; merge only after Leon approves.

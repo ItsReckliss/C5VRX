@@ -29,13 +29,14 @@ static unsigned s_suspend_depth;
 static uint64_t s_next_open, s_opened_at;
 static uint32_t s_opens, s_faults, s_late_max, s_open_max;
 static bool s_history_loaded, s_history = false;
-static bool s_cvbs_loaded, s_cvbs_legacy;
+static bool s_cvbs_loaded;
+static unsigned s_cvbs_mode;
 static bool s_level_loaded, s_level;
 
 bool c5vrx4_level_enabled(void)
 {
     if (!s_level_loaded) {
-        nvs_handle_t h; uint8_t enabled = 0;
+        nvs_handle_t h; uint8_t enabled = 1;
         if (nvs_open("c5vrx4", NVS_READONLY, &h) == ESP_OK) {
             (void)nvs_get_u8(h, "level_lab", &enabled); nvs_close(h);
         }
@@ -46,19 +47,31 @@ bool c5vrx4_level_enabled(void)
 
 static bool s_ultrafine_loaded, s_ultrafine = false;
 
-bool c5vrx4_cvbs_legacy_enabled(void)
+unsigned c5vrx4_cvbs_mode(void)
 {
     if (!s_cvbs_loaded) {
         nvs_handle_t handle;
-        uint8_t enabled = 0;
+        uint8_t mode = C5VRX4_CVBS_STD150;
         if (nvs_open("c5vrx4", NVS_READONLY, &handle) == ESP_OK) {
-            (void)nvs_get_u8(handle, "cvbs_legacy", &enabled);
+            /* Historical key: 1 still means LEGACY_FULL. */
+            (void)nvs_get_u8(handle, "cvbs_legacy", &mode);
             nvs_close(handle);
         }
-        s_cvbs_legacy = enabled == 1;
+        s_cvbs_mode = mode <= C5VRX4_CVBS_150 ? mode : C5VRX4_CVBS_STD150;
         s_cvbs_loaded = true;
     }
-    return s_cvbs_legacy;
+    return s_cvbs_mode;
+}
+
+bool c5vrx4_cvbs_legacy_enabled(void)
+{
+    return c5vrx4_cvbs_mode() == C5VRX4_CVBS_LEGACY;
+}
+
+const char *c5vrx4_cvbs_mode_name(void)
+{
+    static const char *const names[] = {"STD150", "LEGACY_FULL", "CVBS150"};
+    return names[c5vrx4_cvbs_mode()];
 }
 
 bool c5vrx4_ultrafine_forced(void)
@@ -196,12 +209,16 @@ static void print_state(void)
            rf_native_agc_active() ? "native" : "direct_gain_v5",
            running, open, PERIOD_US, WINDOW_US, opens, late, duration, faults,
             control);
+    static const char *const slopes[] = {"0.150", "full_span", "0.150"};
+    static const unsigned blanks[] = {310u, 0u, 300u};
+    unsigned mode = c5vrx4_cvbs_mode();
     printf("C5VRX4_CVBS transfer=%s reference_mv=%u volts_per_mhz=%s "
            "calibration=%s load_ohms=75 level_lab=%u "
-           "sync_repair=0 keys=M_AB_reboot,J_snapshot\n",
-           c5vrx4_cvbs_legacy_enabled() ? "LEGACY_FULL" : "CVBS150",
-           (unsigned)(c5vrx4_cvbs_legacy_enabled() ? c5v4_dac_uv[c5v4_dac_legacy_codes[32]] / 1000u : 300u),
-           c5vrx4_cvbs_legacy_enabled() ? "full_span" : "0.150",
+           "sync_repair=0 keys=M_cycle_reboot,J_snapshot\n",
+           c5vrx4_cvbs_mode_name(),
+           mode == C5VRX4_CVBS_LEGACY ? (unsigned)(c5v4_dac_uv[c5v4_dac_legacy_codes[32]] / 1000u) :
+                                        blanks[mode],
+           slopes[mode],
            C5V4_DAC_MEASURED ? "measured" : "nominal", c5vrx4_level_enabled());
     printf("C5VRX4_LANES policy=%s lane=%u adc_step=%u window_codes=%u "
            "fold_guard=%s\n", c5vrx4_ultrafine_forced() ? "fixed_ultrafine" : "protected_v5",
@@ -248,16 +265,20 @@ bool c5vrx4_console(int key)
         return true;
     }
     if (key == 'M') {
+        /* STD150 -> CVBS150 -> LEGACY_FULL -> STD150. */
+        static const uint8_t next_mode[] = {C5VRX4_CVBS_150, C5VRX4_CVBS_STD150,
+                                            C5VRX4_CVBS_LEGACY};
+        static const char *const next_name[] = {"CVBS150", "STD150", "LEGACY_FULL"};
         nvs_handle_t handle;
-        bool enabled = !c5vrx4_cvbs_legacy_enabled();
+        unsigned mode = c5vrx4_cvbs_mode();
         esp_err_t err = nvs_open("c5vrx4", NVS_READWRITE, &handle);
         if (err == ESP_OK) {
-            err = nvs_set_u8(handle, "cvbs_legacy", enabled ? 1 : 0);
+            err = nvs_set_u8(handle, "cvbs_legacy", next_mode[mode]);
             if (err == ESP_OK) err = nvs_commit(handle);
             nvs_close(handle);
         }
         printf("C5VRX4 cvbs_next=%s err=%s action=%s\n",
-               enabled ? "LEGACY_FULL" : "CVBS150", esp_err_to_name(err),
+               next_name[mode], esp_err_to_name(err),
                err == ESP_OK ? "reboot" : "unchanged");
         if (err == ESP_OK) { fflush(stdout); vTaskDelay(pdMS_TO_TICKS(120)); esp_restart(); }
         return true;

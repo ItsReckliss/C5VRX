@@ -41,6 +41,7 @@ def main():
         ("arc_v5_autotune", ["main/arc_v5_autotune.c", "main/arc_v3_controller.c"]),
         ("phase8_envelope", ["main/direct_gain_v3.c", "main/arc_phy.c"]),
         ("cvbs_level", ["-I.", "cvbs_level.c"]),
+        ("cvbs_snapshot", ["-I."]),
         ("afc_state", []), ("afc_v2", ["-lm"]), ("afc_v2_ctrl", ["-lm"]),
         ("integration", ["-DC5VRX4_EXPERIMENT=1", "-I.", "-Itools/phy_lab_stubs", "main/direct_gain_v3.c", "main/arc_phy.c"]),
         ("c5vrx4_gate", ["-pthread", "-I.", "-Itools/phy_lab_stubs"]),
@@ -64,7 +65,7 @@ def main():
     for name in ("test_unwrap.py", "test_cvbs.py", "tools/test_phase8_hr_live.py",
                  "tools/test_fm_hc.py", "tools/check_golden_two_slot.py"):
         run([sys.executable, name])
-    print("PASS: isolated C5VRX-4 integration, 20 C regressions, exhaustive unwrap and source-driven DSP tests")
+    print("PASS: isolated C5VRX-4 integration, 21 C regressions, exhaustive unwrap and source-driven DSP tests")
 
 if __name__ == "__main__":
     main()

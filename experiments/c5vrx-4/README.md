@@ -29,8 +29,12 @@ of merging. Current main's existing alpha workflow/flasher can build this projec
 - Severe coarse-lane clipping (>=50%, P95>=95) sends active Direct Gain to G20,
   its existing controller floor. Moderate overload uses staged RF/BB cuts.
   Finer-lane saturation first escapes to coarse. No native/manual gain writes.
-- Fixed nominal loaded CVBS transfer: 0.300-V reference + 0.150 V/MHz, nearest
-  DAC code with saturation. Frequency headroom does not determine voltage slope.
+- Fixed nominal loaded CVBS transfer STD150 (default): 0.310-V blanking +
+  0.150 V/MHz, nearest DAC code with saturation. Assumed nominal sync/white
+  targets are 0.010/1.010 V: 0.300 V sync depth and 1.000 V sync-to-white
+  under one 75-ohm load. Replaces HR100's undersized output; full amplitude
+  leaves only small rail margin, not broad CFO tolerance. CVBS150 and legacy
+  remain M comparisons. See CVBS_OUTPUT.md for sources and physical limits.
 - Slow sync supervision uses the same stride-3 Phase8/winding transfer estimate,
   instead of the old Phase5 shadow. Snapshot alignment remains approximate.
 - AFC V2 measures burst-confirmed sync and burst-free porch, with both endpoints
@@ -49,8 +53,8 @@ of merging. Current main's existing alpha workflow/flasher can build this projec
 |---|---|
 | `T` | Detector, mapping, lane geometry and gain-owner status |
 | `J` | AFC state plus eight bounded sync/IQ snapshots; no actuator |
-| `u` | Experimental automatic sync/black level servo, opt-in/reboot; fixed mapping required |
-| `M` | Fixed CVBS150 / previous full-span transfer, reboot |
+| `u` | Toggle default-on sync/black level regulation, reboot; fixed mapping required |
+| `M` | Cycle STD150 (default) / CVBS150 / previous full-span transfer, reboot |
 | `Z` | Protected adaptive V5 / fixed ultrafine comparison, reboot |
 | `h` | STATIC / bounded HISTORY phase decode, reboot |
 | `N` | Direct Gain / native AGC, reboot |
@@ -79,8 +83,9 @@ this directory's C regressions, AFC cases, Phase8/routing tests and exhaustive
 required; this verification does not need NumPy, network access or hardware.
 Generated tables must match checked-in artifacts. No binaries are committed.
 The supervisory task stack is 16 KiB to accommodate the bounded snapshot
-analyzer; startup refuses allocation failure. Heap/stack margin under menu and
-concurrent J capture still needs hardware observation.
+analyzer; startup refuses allocation failure. The separate adaptive 5/20-ms level worker uses another 16-KiB stack and an 8190-byte heap
+snapshot; J capture also has a 16-KiB stack. Heap/stack margin under menu and
+concurrent capture still needs hardware observation; T reports level-worker margins.
 
 [INTEGRATION.md](INTEGRATION.md) records PR/issue disposition and acceptance.
 [INTEGRATION_SOURCES.json](INTEGRATION_SOURCES.json) pins donor revisions.
@@ -92,7 +97,12 @@ Earlier research files are donor records; this README defines current defaults.
 This is an unmerged test build. Host tests and compiler success do not establish
 sample-gapless transport, improved sensitivity/range, PAL/NTSC compliance or
 HDZero acceptance. Fixed scaling does not recover phase information lost to
-clipping, origin collapse or RF noise. Automatic video level regulation is available only in the `u` lab; it is off
-by default pending LUT arbitration/FIFO and HDZero bench acceptance. It corrects
-output gain and offset, not IQ DC. H/V regeneration/coasting and CPU raw-ring
-sync repair remain absent. See [CVBS_LEVEL.md](CVBS_LEVEL.md) for operation and limits.
+clipping, origin collapse or RF noise. Automatic sync-referenced video level regulation is enabled by default at Leon's
+request. It targets 286/300-mV NTSC/PAL sync depth, rejects noisy/stale evidence,
+holds through signal loss and latches off on write/transport faults. Three valid
+snapshots qualify bounded updates; recovery runs at 5 ms for 100 ms, then
+returns to 20 ms. RF settling and lane history are excluded; each DAC entry
+slews by at most 32 mV according to the loaded voltage table. Concurrent LUT arbitration and goggle
+acceptance remain physical gates. It corrects output gain/offset, not IQ DC.
+H/V regeneration/coasting and CPU raw-ring sync repair remain absent.
+See [CVBS_LEVEL.md](CVBS_LEVEL.md) for controls, evidence and limits.

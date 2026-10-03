@@ -74,14 +74,14 @@ gain intentionally remains manual; select active Direct Gain for this test.
   filter overrides are not promoted to defaults merely because a branch exists.
 - Simultaneous RX/TX BitScrambler, >40 MB/s live transport and CPU flywheel
   sample repair remain excluded by the recorded hardware/throughput findings.
-- Default has no automatic live LUT AGC; the opt-in `u` lab is pending hardware
-  acceptance. No endpoint-only IQ DC correction, H/V regeneration or
+- PR164 enables bounded sync-referenced output regulation by default at Leon's
+  request; concurrent LUT/FIFO/goggle acceptance remains pending. No endpoint-only IQ DC correction, H/V regeneration or
   frame buffering is inserted. Missing RF/phase information cannot be restored
   by output scaling alone.
 
 ## Verification and acceptance
 
-`python3 verify.py` checks 19 C regressions (gain/range, epochs, protected lanes,
+`python3 verify.py` checks 21 C regressions (gain/range, epochs, protected lanes,
 severe overload, menu, AFC and pinned/unpinned PHY lab lifecycle), 48 synthetic
 PAL/NTSC AFC cases, all 524,386,048 bounded unwrap trajectories, routing/ring
 state, source-driven Phase8/Golden/HC models and fixed/legacy CVBS transfer/noise
@@ -111,8 +111,31 @@ an explicit operator decision after reviewing this concrete PR and its evidence.
 
 ## Output-amplitude follow-up
 
-The distance-dependent voltage report motivates the opt-in `u` sync/black
+The distance-dependent voltage report motivates the default-on `u` sync/black
 level servo, with stopped-engine LUT16 addressing probe and bounded DAC-only
 live writes. CVBS_LEVEL.md records its implementation, refusal conditions,
 physical-source ambiguity and required bench acceptance. This does not establish
 the cause of the observed amplitude fall or recover RF information.
+
+## PR164 default-on follow-up (2026-10-04)
+
+Extends Leon's weak-signal amplitude report and the existing level lab: a separate
+adaptive 5/20-ms supervisor copies 8190 completed IQ bytes, requires three consistent
+period/plateau snapshots and targets 286/300-mV sync with bounded 32-mV electrical slew.
+Default-on is explicitly operator-authorized; explicit off settings remain off.
+RF gain ownership and AFC defaults are unchanged. Host tests cover half-depth
+fades, loss/stale hold, NTSC/PAL targets, all line alignments and ring-wrap/deadline
+refusal. It needs 8190 heap bytes plus a 16-KiB stack. LUT readback and transport
+faults after updates latch off until reboot. Physical arbitration, response time,
+colour/white clipping and goggle/FIFO/heap acceptance remain unproven.
+
+## RF-gain transition follow-up
+
+Level recovery uses three new 5-ms snapshots after Direct Gain settling, within
+a 100-ms fast interval before returning to 20 ms. Gain/PHY/lane history guards
+are independent; invalid/replayed evidence holds the output. The DAC slew now
+uses loaded voltage rather than numeric code distance, covering resistor carry
+steps and measured nonmonotonic tables. The host gain-step regression recovers
+both offset and half-depth changes within 75 ms of valid settled evidence.
+Physical transition static, concurrent LUT timing and goggle acceptance still
+need bench evidence; no unknown PHY/DC actuator or CPU waveform path is enabled.

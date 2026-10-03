@@ -105,8 +105,14 @@ def transfer_delta(index):
 # Values describe the existing network under one 75-ohm AV load, not an
 # unloaded DAC or a double-terminated scope. Override with measured values.
 CALIBRATION = HERE / "dac_calibration.json"
-VOLTS_PER_MHZ = 0.15
-BLANK_VOLTS = 0.300
+LEVEL_SLEW_VOLTS = 0.032  # C5V4_LEVEL_STEP_UV in cvbs_level.h
+# Mode 0 (including existing default settings) now uses standard amplitude.
+# 0 STD150: 0.310 V blanking, 0.150 V/MHz -> 0.010 V nominal sync,
+#           1.010 V nominal white. Only ~10 mV offset margin, not 2.2 MHz.
+# 1 LEGACY_FULL: old full detector span; 2 CVBS150: old zero-floor mapping.
+# Targets assume -2 MHz sync / +4.667 MHz white; verify the actual VTX.
+TRANSFERS = {"std150": (0.310, 0.150), "cvbs150": (0.300, 0.150)}
+VOLTS_PER_MHZ, BLANK_VOLTS = 0.150, 0.310
 
 
 def voltages():
@@ -124,26 +130,36 @@ def voltages():
         not math.isfinite(v) or not 0 <= v <= 3.3 for v in values) or
         abs(values[0]) > 0.05 or max(values) < 0.95):
         raise ValueError("Need 64 finite loaded voltages, sync near zero and >=0.95 V headroom")
+    # The default-on level servo moves each entry at most 32 mV per update and
+    # deliberately holds at a wider ladder gap (CVBS_LEVEL.md). Refuse such a
+    # table here rather than ship a servo that silently stalls across it.
+    ladder = sorted(values)
+    gap = max(b - a for a, b in zip(ladder, ladder[1:]))
+    if gap > LEVEL_SLEW_VOLTS:
+        raise ValueError(f"DAC ladder gap {gap * 1000:.1f} mV exceeds the "
+                         f"{LEVEL_SLEW_VOLTS * 1000:.0f}-mV level-servo slew bound")
     return values
 
 
-def dac_codes(legacy=False):
+def dac_codes(legacy=False, transfer="std150"):
     voltage = voltages()
+    if legacy is True: transfer = "legacy"
     def target(index):
         delta = transfer_delta(index)
-        if legacy:
+        if transfer == "legacy":
             return max(voltage) * max(0, min(1, (delta + 128) / 255))
         # delta is in Phase8 bins over the *75 ns* interval. +/-winding
         # classification remains intact; only the final volts/Hz changes.
-        return BLANK_VOLTS + delta / (256 * SPAN_S) / 1e6 * VOLTS_PER_MHZ
+        blank, slope = TRANSFERS[transfer]
+        return blank + delta / (256 * SPAN_S) / 1e6 * slope
     return [min(range(64), key=lambda code: abs(voltage[code] -
                 max(min(voltage), min(max(voltage), target(index)))))
             for index in range(256)]
 
 
-def words_for(history, legacy=False):
+def words_for(history, legacy=False, transfer="std150"):
     phases = decoder(history)
-    dac = dac_codes(legacy)
+    dac = dac_codes(legacy, transfer)
     words = []
     for bank in range(4):
         for index in range(256):
@@ -157,10 +173,15 @@ def words_for(history, legacy=False):
     return words
 
 
-def build(history, legacy=False):
-    words = words_for(history, legacy)
-    mode = ('history' if history else 'static') + (' legacy' if legacy else ' CVBS150')
+NAMES = {"std150": " STD150", "legacy": " legacy", "cvbs150": " CVBS150"}
+
+
+def build(history, legacy=False, transfer="std150"):
+    if legacy is True: transfer = "legacy"
+    words = words_for(history, False, transfer)
+    mode = ('history' if history else 'static') + NAMES[transfer]
     return f"""# C5VRX-4: unwrapped Phase8 {mode}, 75 ns endpoint difference.
+# STD150 default: 0.310 V blanking, 0.150 V/MHz, nominal 1 V sync-to-white.
 # CVBS150: 0.300 V blanking, 0.150 V/MHz, saturating loaded DAC.
 # Legacy comparison retains the previous full-range amplitude transfer.
 # Three bundles consume 3 IQ bytes and emit [D,D,D] at 40 MHz.
@@ -222,10 +243,10 @@ decode_next:
 
 def generate():
     for history in (False, True):
-        for legacy in (False, True):
-            name = ('history' if history else 'static') + ('_legacy' if legacy else '')
+        for transfer, suffix in (("std150", ""), ("legacy", "_legacy"), ("cvbs150", "_cvbs150")):
+            name = ('history' if history else 'static') + suffix
             path = HERE / f'c5vrx4_phase8_{name}.bsasm'
-            path.write_text(build(history, legacy), encoding='utf-8')
+            path.write_text(build(history, False, transfer), encoding='utf-8')
             print(f'Generated {path.name}: three bundles, trajectory unwrap, fixed CVBS scale')
     voltage = voltages()
     def array(name, values, ctype):
@@ -237,6 +258,7 @@ def generate():
     header += array('c5v4_trajectory', [trajectory_class(i) for i in range(256)], 'uint8_t')
     header += array('c5v4_dac_codes', dac_codes(), 'uint8_t')
     header += array('c5v4_dac_legacy_codes', dac_codes(True), 'uint8_t')
+    header += array('c5v4_dac_cvbs150_codes', dac_codes(False, "cvbs150"), 'uint8_t')
     header += array('c5v4_dac_uv', [round(v*1e6) for v in voltage], 'uint32_t')
     header += '#define C5V4_DAC_MEASURED ' + str(int(CALIBRATION.exists())) + '\n'
     (HERE / 'cvbs_tables.h').write_text(header)

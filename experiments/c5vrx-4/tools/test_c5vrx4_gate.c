@@ -9,6 +9,7 @@
 #include "freertos/semphr.h"
 static bool native;
 static unsigned timer_calls;
+static int saved_level = -1;
 static uint64_t alarm_at;
 static StaticSemaphore_t mutex_storage;
 #define xSemaphoreCreateRecursiveMutex() xSemaphoreCreateRecursiveMutexStatic(&mutex_storage)
@@ -32,7 +33,7 @@ uint8_t rf_get_iq_lanes(void) { return 2; }
 esp_err_t nvs_open(const char *name,int mode,nvs_handle_t *h)
 { assert(!strcmp(name,"c5vrx4")); (void)mode; *h=1; return ESP_OK; }
 esp_err_t nvs_get_u8(nvs_handle_t h,const char *key,uint8_t *v)
-{ (void)h; (void)key; (void)v; return ESP_FAIL; }
+{ (void)h; if (!strcmp(key,"level_lab") && saved_level >= 0) { *v=saved_level; return ESP_OK; } return ESP_FAIL; }
 esp_err_t nvs_set_u8(nvs_handle_t h,const char *key,uint8_t v)
 { (void)h; (void)key; (void)v; return ESP_FAIL; }
 esp_err_t nvs_commit(nvs_handle_t h) { (void)h; return ESP_OK; }
@@ -43,6 +44,11 @@ void vTaskDelay(unsigned ticks) { (void)ticks; }
 #include "../pipeline.c"
 int main(void)
 {
+    assert(c5vrx4_cvbs_mode() == C5VRX4_CVBS_STD150);
+    assert(!strcmp(c5vrx4_cvbs_mode_name(), "STD150"));
+    assert(c5vrx4_level_enabled()); /* absent NVS enables the new default */
+    saved_level=0;s_level_loaded=false;assert(!c5vrx4_level_enabled());
+    saved_level=1;s_level_loaded=false;assert(c5vrx4_level_enabled());
     void *m=mmap((void *)0x600A0000,0x10000,PROT_READ|PROT_WRITE,
                  MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0);
     assert(m!=MAP_FAILED);
