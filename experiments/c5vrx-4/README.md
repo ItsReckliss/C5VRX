@@ -1,90 +1,98 @@
-# C5VRX-4: long-range receiver research
+# C5VRX-4 integrated alpha
 
-Status: first experimental firmware implementation. This is not a demonstrated
-replacement for C5VRX-3 or a measured range improvement.
-The ordinary PR release still builds the root C5VRX-3 application. The separate
-**C5VRX-4 Experimental Build** workflow uploads the experimental firmware as an
-Actions artifact; it does not publish it as a production release.
+One isolated ESP32-C5 receiver project, assembled from the C5VRX-3 range/control
+work and the three-bundle Phase8 Unwrap75 experiments. It extends **C5VRX by
+Twotoz and the C5VRX contributors**, including Twotoz's receiver research.
+Source: https://github.com/Twotoz/C5VRX · official website and Discord invite:
+https://twotoz.github.io/C5VRX/. Existing author notices and GPL-3.0-only apply.
 
-Started from main `59a8713b467916f00436642702a4b14e9598c662` on 2026-09-30.
-Research imported from PR #122, commit `33a8c0b`, without importing its firmware
-changes. The experiment lives at `experiments/c5vrx-4` in the repository root.
+This directory contains its own runtime `main/`, configuration, partition table,
+tests and evidence. It does not compile the repository's C5VRX-3 `main/`.
+The integration PR changes only `experiments/c5vrx-4/`; merge requires the
+operator's explicit approval. Building and publishing a PR alpha is independent
+of merging. Current main's existing alpha workflow/flasher can build this project.
 
-## Objective
+## Receiver contract
 
-Maximize usable analog-FPV range while retaining at least Golden Phase5 colour,
-detail, sync stability and fade recovery. Phase8 is a comparison baseline,
-not a required architecture. The entire sample/DSP/output pipeline may be
-redesigned; measured hardware limits still apply.
+- MODEM_DIAG packed Q4/I4, positive-edge PARLIO RX at 40 MS/s, raw cyclic ring.
+- TX-only Phase8 endpoint decode plus middle-sample quadrant winding; exactly
+  three bundles per three input/output bytes. Unique CVBS 13.333 MS/s,
+  continuous `[D,D,D]` at a 40 MHz / 40 MB/s physical DAC transport.
+- Six original DAC GPIOs and resistor network; no CPU sample-paced output.
+- Direct Gain V5 by default: first-window physical correction, 200-us observer,
+  descriptor dedupe, table-maximum listening, measured noise lane cap and
+  anti-hunt damping. Native AGC remains a separate opt-in gain owner.
+- Protected adaptive lanes by default: two fresh overlap windows before a
+  one-step finer upgrade; immediate fold escape, 210-us post-switch observation
+  exclusion, retained phase state, magnitude-only GPIO routing updates.
+  This is not an atomic or tagged hardware handover.
+- Severe coarse-lane clipping (>=50%, P95>=95) sends active Direct Gain to G20,
+  its existing controller floor. Moderate overload uses staged RF/BB cuts.
+  Finer-lane saturation first escapes to coarse. No native/manual gain writes.
+- Fixed nominal loaded CVBS transfer: 0.300-V reference + 0.150 V/MHz, nearest
+  DAC code with saturation. Frequency headroom does not determine voltage slope.
+- Slow sync supervision uses the same stride-3 Phase8/winding transfer estimate,
+  instead of the old Phase5 shadow. Snapshot alignment remains approximate.
+- AFC V2 measures burst-confirmed sync and burst-free porch, with both endpoints
+  valid, bounded/stable 16-window evidence, context/settle/copy refusal and a
+  maximum of four 250-kHz acquisition steps. AFC video TRACK is sticky and
+  writes nothing while valid; it is independent of gain HOLD. **AUTO defaults
+  off**: transmitter reference/sign still need physical calibration.
+- PR154 PHY ownership restoration, serialized generation-checked gain writes,
+  stale-overload mailbox rejection, reversible pinned PHY/BW/11p/native-hold labs.
+- Main's analog-video scanner confidence and centred-RF tie-break are retained.
+  They identify candidate channels; a confident scan is not range proof.
 
-## Starting documents
+## Operator controls
 
-- [RESEARCH.md](RESEARCH.md): source review, evidence, rejected assumptions,
-  hardware constraints and candidate architectures carried over from PR #122.
-- [DESIGN.md](DESIGN.md): project decisions, open questions and implementation
-  sequence for this experiment.
-- [../../docs/arc-receive-chain.md](../../docs/arc-receive-chain.md): recovered
-  PHY ABI, RF/BB/fine gain stages and calibration constraints.
-- [../../docs/continuous-iq-findings.md](../../docs/continuous-iq-findings.md):
-  live source, SRAM ownership and physically demonstrated capture behaviour.
+| Key | Action |
+|---|---|
+| `T` | Detector, mapping, lane geometry and gain-owner status |
+| `J` | AFC state plus eight bounded sync/IQ snapshots; no actuator |
+| `u` | Experimental automatic sync/black level servo, opt-in/reboot; fixed mapping required |
+| `M` | Fixed CVBS150 / previous full-span transfer, reboot |
+| `Z` | Protected adaptive V5 / fixed ultrafine comparison, reboot |
+| `h` | STATIC / bounded HISTORY phase decode, reboot |
+| `N` | Direct Gain / native AGC, reboot |
+| `H`, `{}`, `[]`, `W`, `B`, `A`, `:`, `L` | PR154 shared PHY diagnostics/labs |
+| `(`, `)` | Explicit native-only BB hold / 100-cycle reversible lab |
 
-## Working rule
+The lane comparison uses the new NVS key `c5vrx4/force_ultra_v2`; the old
+PR146 `force_ultra` setting does not silently force the integrated default.
+Other C5VRX-4 settings remain in `c5vrx4`, separate from C5VRX-3 `c5vrx`.
+STATIC remains the default; HISTORY and fixed ultrafine are comparisons.
+Normal probes are disabled at boot. Lab writes require the pinned PHY archive;
+unknown libraries keep observation and refuse undocumented writes.
 
-The operator subsequently requested implementation. The first target uses
-the existing board, eight coarse IQ lanes and a three-bundle span-75 detector.
-It reuses the root RF/UI/DMA infrastructure through compile-time experiment
-hooks; the new program, generator, gate controller and build entry live here.
-A separate architecture choice is still open: whether additional DSP hardware
-is allowed for the wider I6/Q6/filter/tracking pipeline.
-
-Usable-range improvement means additional controlled RF attenuation at equal
-picture quality. Larger IQ amplitude, a register labelled dB, or smoother
-close-range video alone does not establish sensitivity improvement.
-
-## Build
-
-From an ESP-IDF v6.0.2 environment, in this directory:
+## Build and verification
 
 ```sh
-python generate_pipeline.py
+cd experiments/c5vrx-4
+python3 verify.py
+. "$IDF_PATH/export.sh"  # ESP-IDF v6.0.2
 idf.py -DIDF_TARGET=esp32c5 build
 ```
 
-App output: `build/c5vrx4.bin`. Flashing requires the matching bootloader and
-partition table plus app, using this project's `flasher_args.json`.
-No automatic flash is performed by the build.
+IDF configuration invokes `verify.py`, so the existing alpha workflow executes
+this directory's C regressions, AFC cases, Phase8/routing tests and exhaustive
+524,386,048-trajectory oracle before cross-compiling. Host Python 3 and GCC are
+required; this verification does not need NumPy, network access or hardware.
+Generated tables must match checked-in artifacts. No binaries are committed.
+The supervisory task stack is 16 KiB to accommodate the bounded snapshot
+analyzer; startup refuses allocation failure. Heap/stack margin under menu and
+concurrent J capture still needs hardware observation.
 
-Build record (2026-09-30): ESP-IDF v6.0.2 Docker build completed successfully;
-application size `0x115760` bytes, version `4.0.0-exp-span75`. The ordinary
-root application was not rebuilt in this implementation session.
+[INTEGRATION.md](INTEGRATION.md) records PR/issue disposition and acceptance.
+[INTEGRATION_SOURCES.json](INTEGRATION_SOURCES.json) pins donor revisions.
+[CVBS_OUTPUT.md](CVBS_OUTPUT.md) explains the loaded transfer and scope model.
+Earlier research files are donor records; this README defines current defaults.
 
-## First hardware observation (2026-09-30)
+## Evidence boundary
 
-Commit `162c2ab` was flashed on the connected ESP32-C5, including the matching
-bootloader and partition table; esptool verified the written hashes. The
-operator reported usable video, some noise, and a less clean picture than
-C5VRX-3. This is the starting prototype for further development, not evidence
-of additional range. No controlled attenuation comparison or instrumentation
-of the output waveform has been performed.
-
-## First firmware contract
-
-- IQ: signed coarse I[9:6]/Q[9:6], 40 MS/s, continuous existing 32 KiB DMA ring.
-- Detector: Phase6 endpoint difference across 75 ns, separate nominal
-  resistor-DAC inversion LUT; three bundles consume and emit three bytes.
-- Output: 13.333 MS/s unique codes held `[D,D,D]` at 40 MHz, existing pin order.
-- Native gain ownership is forced for this experimental build without changing
-  the normal build's gain-owner NVS setting. Firmware never selects a gain.
-- Native tracking gate: 1000 us period, 20 us open, acquisition profile 127;
-  suspended across channel, bandwidth and frequency-offset changes.
-- `~` compares paced/continuous native tracking. `T` prints `C5VRX4` timing
-  state before the existing diagnostics. Settings use NVS namespace `c5vrx4`.
-- Menu rendering remains the original raster transport; video output mode is
-  fixed to 6BIT@40 for this experiment.
-
-This version does **not** implement wider IQ capture, a complex channel filter,
-an FM tracking loop or matched transmitter de-emphasis. It does not repair
-individual samples. The DAC table uses nominal resistor values, not measured
-board calibration. Wrap at +/-6.667 MHz, video aliasing, hardware FIFO pacing
-and colour/detail response remain unverified. Software Phase5-derived sync
-diagnostics are not a measurement of this detector's actual DAC waveform.
+This is an unmerged test build. Host tests and compiler success do not establish
+sample-gapless transport, improved sensitivity/range, PAL/NTSC compliance or
+HDZero acceptance. Fixed scaling does not recover phase information lost to
+clipping, origin collapse or RF noise. Automatic video level regulation is available only in the `u` lab; it is off
+by default pending LUT arbitration/FIFO and HDZero bench acceptance. It corrects
+output gain and offset, not IQ DC. H/V regeneration/coasting and CPU raw-ring
+sync repair remain absent. See [CVBS_LEVEL.md](CVBS_LEVEL.md) for operation and limits.

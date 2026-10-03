@@ -1,77 +1,50 @@
-# C5VRX-4 design starting point
+# Integrated C5VRX-4 architecture
 
-## Accepted scope
+Extends C5VRX by Twotoz and contributors. The authoritative integration contract
+is README.md; INTEGRATION_SOURCES.json records exact donor revisions.
 
-- Repository-root location: `experiments/c5vrx-4`.
-- Independent development branch from current main, not a fork of PR #122's
-  firmware policy. Main currently uses Direct Gain V5 by default.
-- Target: maximum usable range with at least Golden Phase5 image quality.
-- Phase8, its LUT representation and its two-bundle output geometry may be
-  replaced. New hardware is an option to evaluate, not a selected requirement.
-- Native AGC remains a user requirement for the experimental receiver; paced
-  native operation is a comparison candidate. The main build's gain policy
-  must not be mistaken for this experimental design decision.
-- The operator subsequently authorized an isolated experimental build. The
-  existing-board span-75 prototype is implemented for comparison; it is not
-  a demonstrated choice for the final long-range architecture.
+The sample path is MODEM_DIAG Q4/I4 → positive-edge PARLIO RX → raw cyclic ring
+→ one TX BitScrambler → original 6-bit resistor DAC. IQ and physical DAC rates
+are 40 MS/s. Phase endpoints span 75 ns; two intervening raw sign pairs classify
+winding. The three-bundle schedule outputs `[D,D,D]` with 13.333 MS/s unique
+video. The 524,386,048-case oracle assumes each adjacent phase step is within
+63/256 turn; it does not recover missing ADC bits or prove RF continuity.
 
-## Architecture candidates
+Final voltage is mapped after winding resolution and saturates. Detector span,
+RF amplitude and loaded DAC voltage are separate quantities. STATIC/HISTORY
+and fixed/legacy voltage choices are boot-selected programs; default has no running LUT
+reload temporarily changes its width. Unknown trajectory maps to blank reference.
 
-| Candidate | Hardware impact | Why investigate | Main unresolved issue |
-| --- | --- | --- | --- |
-| Existing C5, pre-tap filter characterization and improved lane decoding | existing board | reduce information loss / noise before phase estimation | filter placement and lane ambiguity |
-| Three-bundle span-75, 13.333 MS/s unique video | existing board, new streaming program | extra processing stage and calibrated DAC transfer | full-band response, wrapping, dataflow and timing |
-| C5 RF front end, twelve DIAG lanes, external DSP/DAC driver | new wiring and processing hardware | full-range I6/Q6, complex filtering and real tracking demodulation | clock export, capture timing, DSP resources and hardware choice |
+The supervisor owns gain, channel/BW/offset and diagnostics. Direct Gain V5
+operates on fresh descriptor regions and shares serialized PHY actuator ownership
+with retunes. Mailbox epoch/age checks prevent old strong-input observations from
+cutting gain on a new weak signal. Clean IQ performs zero gain writes; no carrier
+returns to the vendor table's maximum listening state. Severe coarse clipping
+uses the controller's G20 floor, with the existing post-drop freshness check.
 
-No candidate has demonstrated additional range. The previous two-bundle
-quadrant-conditioned estimator is retained as research history; the operator
-rejected it as an adequate final solution.
+Adaptive lane upgrades require two overlap observations and one step at a time.
+Recovery is immediate and observations are excluded for 210 us after routing.
+Six sequential magnitude-selector writes preserve sign, output enable and
+inversion, but cannot provide an atomic switch or sample transition tag. Decoder
+history is not reset at physical DMA boundaries or lane changes.
 
-## Design sequence
+Slow sync scoring decodes a frozen stride-3 trajectory/transfer estimate. It is
+not a byte-exact live alignment/history trace or carrier/field lock. AFC V2 uses
+all captured adjacent raw phase pairs for an independent burst/timing reference,
+excludes color burst from porch CFO, requires stationary/fresh epochs, and has
+its own sticky video TRACK. Gain HOLD alone neither proves video lock nor blocks
+AFC acquisition. AUTO is opt-in and at most four bounded steps are allowed.
+AFC actuator ownership is acquired before a second epoch check and decision.
 
-1. Define the common RF/video comparison conditions, expected deviation,
-   carrier offsets, wanted bandwidth and fade-recovery requirements.
-2. Establish what information reaches each available PHY/DIAG tap, including
-   filter response and signed ADC-bit identity. Do not use active MAC dump SRAM
-   as a live source without a new demonstrated access mechanism.
-3. Budget sample rates, lane widths, memory, instructions/logic, output cadence
-   and clock crossings for each viable architecture.
-4. Derive the proposed estimator/filter against independent full-band video
-   cases. Include noise, folding, CFO, multipath and gain transitions.
-5. Select the simplest architecture that can improve the real receiver limit.
-   Only then add the isolated firmware or hardware build target here.
-6. When implementation testing is requested, establish transport continuity
-   and compare required RF input at equal Phase5-quality video.
+Native AGC is never mixed with firmware gain ownership. Its pacing and explicit
+BB-hold lab are optional, reversible comparisons; there is no automatic native
+PAL/NTSC reacquisition controller. Pinned PHY experiments restore vendor state;
+unverified libraries cannot use recovered write masks.
 
-## Evidence distinctions
+All firmware source dependencies are inside this directory. Repository C5VRX-3
+main, root configuration, website and workflow files are unchanged. The existing
+alpha workflow invokes this project; configure-time verification enforces local
+host regressions and generated consistency without adding a shared workflow.
 
-- Individual DIAG-bit correlation does not prove simultaneous twelve-lane timing.
-- Finer sign-preserving lanes fold outside their contiguous windows.
-- RF sensitivity, ADC quantization and demodulation threshold are separate.
-- Post-demodulation filtering cannot undo information lost before angle detection.
-- Matched de-emphasis requires the actual transmitter response; an arbitrary
-  shunt capacitor does not establish a matched television emphasis network.
-- A successful build, stable timer or noiseless static picture does not prove
-  weak/strong gain recovery or extended usable range.
-
-See [RESEARCH.md](RESEARCH.md) for calculations, primary references, source
-revisions and corrected assumptions. The prototype uses coarse I4/Q4 lanes,
-native AGC with a 1 ms hold cadence and 20 us acquisition window, and fine-stage
-setting 127. These are experimental starting settings, not measured optima.
-No external processor or claimed sensitivity gain is selected yet. See
-[README.md](README.md) for the implementation and build instructions.
-
-## Prototype limits and recommendation
-
-Keep C5VRX-3 as the working receiver and comparison reference. C5VRX-4 has no
-measured range advantage. Its three-sample endpoint phase difference can reduce
-some noise, but has less frequency-offset headroom and more attenuation near
-the colour subcarrier. Phase6 also retains less angle precision than Phase8.
-The DAC mapping uses nominal resistor values, not a measured board calibration.
-
-This prototype does not implement full-range I6/Q6 capture, complex filtering,
-a tracking FM demodulator or matched de-emphasis. Those require separate design
-work; whether additional processing hardware is acceptable remains unresolved.
-The first build (`162c2ab`) was flashed and produced usable video. The operator
-reported a less clean picture than C5VRX-3; no range improvement was established.
-See the README hardware observation for the scope of this first comparison.
+The opt-in `u` level lab adds a bounded sync/black servo after winding, using
+DAC-only LUT16 writes. See CVBS_LEVEL.md; live arbitration is not yet proven.
