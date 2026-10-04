@@ -1,0 +1,29 @@
+name: PlatformIO Build
+on:
+  pull_request:
+    paths:
+      - 'platformio.ini'
+      - 'tools/pio_idf_toolchain.py'
+      - 'tools/flash_pio.py'
+      - '.github/workflows/platformio.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: platformio-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pioarduino core
+        run: python -m pip install pioarduino==6.2.0
+      - name: Validate sources
+        run: python tools/validate_build.py
+      - name: Build optional C5VRX-3 environment
+        run: pio run -e xiao_c5
