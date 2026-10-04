@@ -532,6 +532,11 @@ and explicit experimental-flash confirmation as PR builds. Switching
 generations should use Full firmware. Main alpha versions increment independently from C5VRX-3 via
 `tools/c5vrx4_version.py`, and are stamped into ESP-IDF metadata and `VERSION`.
 A rerun reuses the same commit tag; published version assets are never replaced.
+Version resolution also checks published release metadata: after a history
+rewrite, a moved tag can only reuse a release with the same recorded commit or
+firmware-input hash. Different inputs receive a new version, including when a
+published release's tag is missing from the checkout. Publication accepts an
+unchanged input hash across rewritten commit SHAs and preserves existing assets.
 The Pages mirror retains the newest 20 versioned alphas. Legacy
 `c5vrx4-alpha` is a fallback until the first versioned alpha exists.
 Mutable PR and versioned alpha publication compare

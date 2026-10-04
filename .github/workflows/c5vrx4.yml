@@ -46,10 +46,13 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+      - name: Check alpha version regression cases
+        run: python3 tools/test_c5vrx4_version.py
       - name: Resolve independent C5VRX-4 alpha version
         id: resolve
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
@@ -57,7 +60,7 @@ jobs:
             echo "version=4.0.0-alpha-pr.${PR_NUMBER}" >> "$GITHUB_OUTPUT"
             echo "tag=c5vrx4-pr-${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           elif [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
-            result="$(python3 tools/c5vrx4_version.py)"
+            result="$(python3 tools/c5vrx4_version.py --published-releases)"
             echo "version=$(jq -r .version <<< "$result")" >> "$GITHUB_OUTPUT"
             echo "tag=$(jq -r .tag <<< "$result")" >> "$GITHUB_OUTPUT"
           else
@@ -142,9 +145,16 @@ jobs:
           if [[ -z "$PR_NUMBER" ]] && gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             previous="$(mktemp -d)"
             gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern COMMIT --dir "$previous"
-            test "$(cat "$previous/COMMIT")" = "$BUILD_SHA"
+            if [[ "$(cat "$previous/COMMIT")" != "$BUILD_SHA" ]]; then
+              gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern FIRMWARE_INPUT_SHA --dir "$previous"
+              if ! cmp -s "$previous/FIRMWARE_INPUT_SHA" release/FIRMWARE_INPUT_SHA; then
+                echo "::error::Alpha tag $tag already contains different firmware; resolve a new version."
+                rm -rf "$previous"
+                exit 1
+              fi
+            fi
             rm -rf "$previous"
-            echo "Version already published for this commit; leaving it unchanged."
+            echo "Version already published for this commit or identical firmware inputs; leaving it unchanged."
             exit 0
           fi
           previous_tag="$tag"
