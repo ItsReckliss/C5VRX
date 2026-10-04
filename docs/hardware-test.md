@@ -15,6 +15,8 @@ Join the six resistors at VIDEO, fit 200 Ohm VIDEO-to-GND, share ground and use
 the normal 75 Ohm receiver termination. Expected loaded levels are roughly
 code 0 = 0 V, code 18 = 0.30 V and code 62 = 1.0 V.
 
+Schematic: [hardware/c5vrx-dac-schematic.png](hardware/c5vrx-dac-schematic.png)
+
 ## 1. Static AV levels
 
 Build `C5VRX2_MODE_AV_STATIC` six times with codes 0, 18, 31, 32, 62 and 63.

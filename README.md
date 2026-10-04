@@ -199,6 +199,10 @@ Connect a 6-bit binary-weighted resistor DAC ladder to the XIAO pins, meeting at
 | **D9** | GPIO 9  | Bit 5 (MSB) | 240 Ω |
 | **GND** | GND | Ground | Ground reference |
 
+![6-bit resistor DAC schematic: D4..D9 through 8.2k, 3.9k, 2.0k, 1.0k, 470 and 240 ohm to CVBS_OUT, with a 200 ohm shunt to GND](docs/hardware/c5vrx-dac-schematic.png)
+
+`CVBS_OUT` in the schematic is the `VIDEO` node. The 470 pF output-filter capacitor (item 2 below) is not drawn.
+
 ### Output network and controls
 1. **Video level**: The reference circuit uses a 200 ohm shunt at `VIDEO`; the connected display or goggles may add their own 75 ohm termination. Check the resulting level with the load you use.
 2. **Output filter**: The reference circuit uses a 470 pF ceramic capacitor from `VIDEO` to `GND`. Check image sharpness with your display and termination.
